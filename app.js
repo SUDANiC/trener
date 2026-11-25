@@ -63,7 +63,8 @@ function ambCount(c) { let n = 0; for (const s of c.sessions) for (const e of s.
 function totalAmb() { return DB ? DB.clients.reduce((a, c) => a + ambCount(c), 0) : 0; }
 function exById(c, id) { for (const p of c.plans) for (const e of p.exercises) if (e.id === id) return e; for (const e of (c.extraEx || [])) if (e.id === id) return e; return null; }
 function exName(c, id) { const e = exById(c, id); return e ? e.name : '?'; }
-function lastFor(c, ex, skipSid, member) { // ostatnie wykonanie ćwiczenia (po id, potem po nazwie), dla danej osoby
+function cleanSet(x) { return !x.note && !x.text && (x.kg != null || x.reps != null || !!x.sec); }
+function lastFor(c, ex, skipSid, member, any) { // ostatnie wykonanie ćwiczenia dla osoby; domyślnie pomija zamiany/dopiski z Excela
   const n = norm(ex.name);
   for (const s of sortedSessions(c)) {
     if (s.id === skipSid || s.live) continue;
@@ -71,12 +72,13 @@ function lastFor(c, ex, skipSid, member) { // ostatnie wykonanie ćwiczenia (po 
       const m = en.member ?? s.member ?? null;
       if (member && m && m !== member) continue;
       if (en.exId === ex.id || norm(exName(c, en.exId)) === n) {
-        if (en.sets.some(x => x.kg != null || x.reps != null || x.sec || x.raw)) return { s, en };
+        if (any ? en.sets.some(x => x.kg != null || x.reps != null || x.sec || x.raw) : en.sets.some(cleanSet)) return { s, en };
       }
     }
   }
   return null;
 }
+function prevSets(l) { return l ? l.en.sets.filter(cleanSet) : []; }
 function bestKg(en) { let m = null; for (const x of en.sets) if (typeof x.kg === 'number' && (m == null || x.kg > m)) m = x.kg; return m; }
 function allExerciseNames() {
   const set = new Map();
@@ -376,8 +378,8 @@ function memberChip(c, m) { return m ? `<span class="chip" style="border-color:$
 function buildEntries(c, p, member) {
   return p.exercises.map(e => {
     const l = lastFor(c, e, null, member);
-    const n = (e.target && e.target.sets) || (l ? Math.min(Math.max(l.en.sets.length, 1), 6) : 3);
-    const prev = l ? l.en.sets : [];
+    const prev = prevSets(l);
+    const n = (e.target && e.target.sets) || (prev.length ? Math.min(prev.length, 6) : 3);
     return { exId: e.id, member: member || null, sets: Array.from({ length: n }, (_, i) => { const pv = prev[i] || prev[prev.length - 1] || {}; return { kg: pv.kg ?? null, reps: pv.reps ?? null, sec: pv.sec ?? null, done: false, ph: true }; }) };
   });
 }
@@ -424,12 +426,21 @@ function renderWorkout(c, sid) {
   const group = s.members && s.members.length > 1;
   ui.wview = ui.wview || {};
   const view = group ? (ui.wview[s.id] || 'all') : 'all';
-  const prevOf = (en, i) => { const ex = exById(c, en.exId) || { id: en.exId, name: '' }; const l = lastFor(c, ex, s.id, entryMember(s, en)); const x = l && (l.en.sets[i]); return x ? setPlain(x) : '–'; };
+  const prevOf = (en, i) => { const ex = exById(c, en.exId) || { id: en.exId, name: '' }; const x = prevSets(lastFor(c, ex, s.id, entryMember(s, en)))[i]; return x ? setPlain(x) : '–'; };
+  const subHint = en => { // ostatnio była zamiana / dopisek – pokaż jako informację
+    const ex = exById(c, en.exId); if (!ex) return '';
+    const a = lastFor(c, ex, s.id, entryMember(s, en), true), cl = lastFor(c, ex, s.id, entryMember(s, en));
+    if (!a || (cl && cl.s === a.s)) return '';
+    const t = a.en.sets.filter(x => !cleanSet(x) && x.raw).map(x => x.raw);
+    return t.length ? `<div class="tiny" style="color:var(--warn);margin:-2px 0 6px">↔ Ostatnio zamiast tego: ${esc(t.join(', '))}</div>` : '';
+  };
+  const swapLbl = en => en.swapFor ? `<div class="tiny muted">zamiast: ${esc(exName(c, en.swapFor))}</div>` : '';
   const progress = m => { let d = 0, t = 0; for (const en of s.entries) if (entryMember(s, en) === m) for (const x of en.sets) { t++; if (x.done) d++; } return `${d}/${t}`; };
   const table = (en, ei, withName) => {
     const m = entryMember(s, en);
     return `<div style="${group ? `border-left:3px solid ${memberColor(c, m)};padding-left:8px;margin-top:10px` : ''}">
     ${group ? `<div class="row" style="margin-bottom:4px">${memberChip(c, m)}${withName ? `<span class="small ex-n">${esc(exName(c, en.exId))}</span>` : ''}<div class="grow"></div><button class="ib" data-exm="${ei}" style="width:32px;height:32px">⋯</button></div>` : ''}
+    ${swapLbl(en)}${subHint(en)}
     ${en.note != null ? `<input class="inp small" data-note="${ei}" placeholder="Notatka do ćwiczenia" value="${esc(en.note)}" style="min-height:36px;margin-bottom:8px">` : ''}
     <table class="sets"><tr><th>Seria</th><th>Poprzednio</th><th>kg</th><th>Powt</th><th>✓</th></tr>
     ${en.sets.map((x, si) => `<tr class="${x.done ? 'done' : ''}"><td class="sn">${si + 1}</td><td class="prev">${esc(prevOf(en, si))}</td>
@@ -481,7 +492,20 @@ function renderWorkout(c, sid) {
   });
   $app.querySelectorAll('[data-add]').forEach(b => b.onclick = () => { const en = s.entries[+b.dataset.add]; const last = en.sets[en.sets.length - 1] || {}; en.sets.push({ kg: last.kg ?? null, reps: last.reps ?? null, done: false, ph: true }); save(); rerender(); });
   $app.querySelectorAll('[data-exm]').forEach(b => b.onclick = () => { const ei = +b.dataset.exm, en = s.entries[ei];
-    menu([{ label: 'Notatka do ćwiczenia', icon: '📝', fn: () => { en.note = en.note || ''; save(); rerender(); } },
+    menu([{ label: 'Zamień ćwiczenie (tylko dziś)', icon: '↔️', fn: () => prompt2('Zamień na', [{ k: 'name', label: 'Ćwiczenie zastępcze', list: 1, ph: 'np. Rzuty piłką lekarską w bok' }], o => {
+            if (!o.name) return;
+            const orig = en.swapFor || en.exId;
+            if (norm(o.name) === norm(exName(c, orig))) { en.exId = orig; delete en.swapFor; }
+            else {
+              let ex = null; for (const pl of c.plans) for (const e of pl.exercises) if (!ex && norm(e.name) === norm(o.name)) ex = e;
+              for (const e of (c.extraEx || [])) if (!ex && norm(e.name) === norm(o.name)) ex = e;
+              if (!ex) { ex = { id: nid(), name: o.name, target: null }; (c.extraEx = c.extraEx || []).push(ex); }
+              en.swapFor = orig; en.exId = ex.id;
+            }
+            const prev = prevSets(lastFor(c, exById(c, en.exId), s.id, entryMember(s, en)));
+            en.sets = Array.from({ length: Math.max(en.sets.length, 1) }, (_, i) => { const pv = prev[i] || prev[prev.length - 1] || {}; return { kg: pv.kg ?? null, reps: pv.reps ?? null, sec: pv.sec ?? null, done: false, ph: true }; });
+            save(); rerender(); }) },
+          { label: 'Notatka do ćwiczenia', icon: '📝', fn: () => { en.note = en.note || ''; save(); rerender(); } },
           { label: 'Usuń ostatnią serię', icon: '➖', fn: () => { en.sets.pop(); save(); rerender(); } },
           { label: 'Historia ćwiczenia', icon: '📈', fn: () => go(`#/c/${c.id}/e/${en.exId}`) },
           { label: 'Usuń z tego treningu', icon: '🗑️', danger: 1, fn: () => { s.entries.splice(ei, 1); save(); rerender(); } }]); });
@@ -496,7 +520,7 @@ function renderWorkout(c, sid) {
         const pl = plan(c, group ? s.planIds[m] : s.planId);
         let ex = pl && pl.exercises.find(e => norm(e.name) === norm(o.name));
         if (!ex) { ex = { id: nid(), name: o.name, target: null }; if (pl && o.plan === 'tak') pl.exercises.push(ex); else (c.extraEx = c.extraEx || []).push(ex); }
-        const l = lastFor(c, ex, s.id, m); const prev = l ? l.en.sets : [];
+        const prev = prevSets(lastFor(c, ex, s.id, m));
         s.entries.push({ exId: ex.id, member: m, sets: Array.from({ length: Math.max(prev.length, 3) }, (_, i) => { const pv = prev[i] || {}; return { kg: pv.kg ?? null, reps: pv.reps ?? null, done: false, ph: true }; }) });
       }
       save(); rerender();
@@ -533,7 +557,7 @@ function renderSession(c, sid) {
   if (s.live) return go(`#/c/${c.id}/w/${s.id}`);
   $app.innerHTML = `${topBar(esc(sessTitle(s, c)), { back: 1, right: `<button class="ib" id="sm">⋯</button>` })}<main>
   <div class="small muted" style="margin-bottom:10px">${sessWhen(s, c)}${s.dur ? ` · ${s.dur} min` : ''}</div>
-  ${s.entries.map((en, ei) => `<div class="card"><div class="ex-h"><div class="ex-ic">🏋️</div><div class="grow ex-n">${esc(exName(c, en.exId))}</div>${s.members && en.member ? memberChip(c, en.member) : ''}</div>
+  ${s.entries.map((en, ei) => `<div class="card"><div class="ex-h"><div class="ex-ic">🏋️</div><div class="grow"><div class="ex-n">${esc(exName(c, en.exId))}</div>${en.swapFor ? `<div class="tiny muted">zamiast: ${esc(exName(c, en.swapFor))}</div>` : ''}</div>${s.members && en.member ? memberChip(c, en.member) : ''}</div>
   ${en.sets.map((x, si) => `<div class="row small" style="padding:4px 0"><span class="sn muted">${si + 1}</span><div class="grow">${setText(x) || '<span class="muted">–</span>'}</div>${x.amb ? `<button class="chip warn" data-fix="${ei}:${si}">? sprawdź</button>` : `<button class="ib" data-fix="${ei}:${si}" style="width:32px;height:32px;font-size:14px">✏️</button>`}</div>`).join('')}
   ${en.note ? `<div class="tiny muted">📝 ${esc(en.note)}</div>` : ''}</div>`).join('') || '<div class="empty">Pusty trening</div>'}
   </main>`;
