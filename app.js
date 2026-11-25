@@ -59,7 +59,7 @@ function sortedSessions(c) { // najnowsze najpierw
   const imp = c.sessions.filter(s => !s.date).sort((a, b) => (b.order || 0) - (a.order || 0));
   return app.concat(imp);
 }
-function ambCount(c) { let n = 0; for (const s of c.sessions) for (const e of s.entries) for (const x of e.sets) if (x.amb) n++; return n; }
+function ambCount(c) { let n = 0; for (const s of c.sessions) for (const e of s.entries) for (const x of e.sets) if (x.amb && !x.dup) n++; return n; }
 function totalAmb() { return DB ? DB.clients.reduce((a, c) => a + ambCount(c), 0) : 0; }
 function exById(c, id) { for (const p of c.plans) for (const e of p.exercises) if (e.id === id) return e; for (const e of (c.extraEx || [])) if (e.id === id) return e; return null; }
 function exName(c, id) { const e = exById(c, id); return e ? e.name : '?'; }
@@ -175,7 +175,8 @@ function pickImport() {
           save(true); go('#/'); render();
         };
         if (DB && DB.clients.length) {
-          menu([{ label: 'Zastąp wszystkie dane plikiem', icon: '♻️', fn: () => confirmBox('Na pewno zastąpić obecne dane?', () => apply('replace'), 'Zastąp') },
+          menu([{ label: 'Zaktualizuj dane z Excela (zachowaj treningi z aplikacji)', icon: '🔄', fn: () => { const n = mergeImport(d); save(true); go('#/'); render(); toast(`Zaktualizowano ${n} podopiecznych`); } },
+                { label: 'Zastąp wszystkie dane plikiem', icon: '♻️', fn: () => confirmBox('Na pewno zastąpić obecne dane?', () => apply('replace'), 'Zastąp') },
                 { label: 'Dodaj tylko nowych podopiecznych', icon: '➕', fn: () => apply('merge') }]);
         } else apply('replace');
       } catch (e) { toast('Nie udało się wczytać: ' + e.message); }
@@ -183,6 +184,66 @@ function pickImport() {
     r.readAsText(f);
   };
   i.click();
+}
+// aktualizacja importu: nowe plany i historia z Excela + zachowane treningi/plany z aplikacji i zatwierdzenia
+function mergeImport(N) {
+  let n = 0;
+  const isImpPlan = (c, p) => p.imp || /^[0-9a-f]{10}$/.test(p.id) || c.sessions.some(s => s.source === 'import' && s.planId === p.id);
+  for (const nc of N.clients) {
+    const oc = DB.clients.find(c => c.id === nc.id) || DB.clients.find(c => norm(c.name) === norm(nc.name));
+    if (!oc) { DB.clients.push(nc); n++; continue; }
+    n++;
+    const oldName = id => exName(oc, id);
+    // zatwierdzone wcześniej wpisy (bez „?”) – przenosimy decyzje
+    const decided = new Map();
+    for (const s of oc.sessions) if (s.source === 'import') for (const en of s.entries) for (const x of en.sets) if (x.raw && !x.amb) decided.set(norm(oldName(en.exId)) + '|' + x.raw, x);
+    const keepPlans = oc.plans.filter(p => !isImpPlan(oc, p));
+    const appSess = oc.sessions.filter(s => s.source !== 'import');
+    const newPlans = nc.plans.concat(keepPlans);
+    const extra = (nc.extraEx || []).slice();
+    const findEx = (name, preferPlan) => {
+      const k = norm(name);
+      if (preferPlan) { const e = preferPlan.exercises.find(e => norm(e.name) === k); if (e) return e; }
+      for (const p of newPlans) for (const e of p.exercises) if (norm(e.name) === k) return e;
+      return extra.find(e => norm(e.name) === k) || (oc.extraEx || []).find(e => norm(e.name) === k);
+    };
+    const mapPlan = (pid, member) => {
+      const op = oc.plans.find(p => p.id === pid);
+      if (!op) return pid;
+      if (keepPlans.includes(op)) return pid;
+      const same = nc.plans.filter(p => (p.member || null) === (op.member || member || null));
+      let best = same.find(p => norm(p.name) === norm(op.name) && !p.archived), bs = 0;
+      if (!best) for (const p of same) { const sc = op.exercises.filter(e => p.exercises.some(x => norm(x.name) === norm(e.name))).length; if (sc > bs) { bs = sc; best = p; } }
+      return best ? best.id : pid;
+    };
+    for (const s of appSess) {
+      const np = plan({ plans: newPlans }, mapPlan(s.planId, s.member));
+      for (const en of s.entries) {
+        for (const f of ['exId', 'swapFor']) {
+          if (!en[f]) continue;
+          const nm = oldName(en[f]); if (nm === '?') continue;
+          let e = findEx(nm, np);
+          if (!e) { e = { id: nid(), name: nm, target: null }; extra.push(e); }
+          en[f] = e.id;
+        }
+      }
+      if (s.planIds) for (const m in s.planIds) s.planIds[m] = mapPlan(s.planIds[m], m);
+      s.planId = mapPlan(s.planId, s.member);
+    }
+    // zatwierdzenia „Do sprawdzenia”
+    const tmp = { plans: nc.plans, extraEx: nc.extraEx || [] };
+    for (const s of nc.sessions) for (const en of s.entries) for (const x of en.sets) if (x.amb) {
+      const o = decided.get(norm(exName(tmp, en.exId)) + '|' + x.raw);
+      if (o) { x.kg = o.kg; x.reps = o.reps; x.sec = o.sec; delete x.amb; delete x.why; }
+    }
+    oc.plans = newPlans; oc.sessions = nc.sessions.concat(appSess);
+    oc.extraEx = (oc.extraEx || []).filter(e => !extra.some(x => x.id === e.id)).concat(extra);
+    oc.sheets = nc.sheets; oc.docs = nc.docs;
+    if (!oc.warmup || !oc.warmup.length) oc.warmup = nc.warmup;
+    if (!oc.members || !oc.members.length) oc.members = nc.members;
+  }
+  DB.importedAt = N.importedAt;
+  return n;
 }
 function exportData() {
   DB.exportedAt = new Date().toISOString();
@@ -287,7 +348,7 @@ function sessionSummary(c, s) {
 function clientHistory(c) {
   const ss = sortedSessions(c);
   if (!ss.length) return `<div class="empty">Brak zapisanych treningów</div>`;
-  return ss.map(s => { const a = s.entries.reduce((n, e) => n + e.sets.filter(x => x.amb).length, 0);
+  return ss.map(s => { const a = s.entries.reduce((n, e) => n + e.sets.filter(x => x.amb && !x.dup).length, 0);
     return `<div class="card" onclick="go('#/c/${c.id}/s/${s.id}')"><div class="row"><div class="grow"><div style="font-weight:700">${esc(sessTitle(s, c))}</div><div class="tiny muted">${sessWhen(s, c)}</div></div>${a ? `<span class="chip warn">${a} ?</span>` : ''}</div><div style="margin-top:6px">${sessionSummary(c, s)}</div></div>`; }).join('');
 }
 function clientWarmup(c) {
@@ -561,7 +622,7 @@ function renderSession(c, sid) {
   ${en.sets.map((x, si) => `<div class="row small" style="padding:4px 0"><span class="sn muted">${si + 1}</span><div class="grow">${setText(x) || '<span class="muted">–</span>'}</div>${x.amb ? `<button class="chip warn" data-fix="${ei}:${si}">? sprawdź</button>` : `<button class="ib" data-fix="${ei}:${si}" style="width:32px;height:32px;font-size:14px">✏️</button>`}</div>`).join('')}
   ${en.note ? `<div class="tiny muted">📝 ${esc(en.note)}</div>` : ''}</div>`).join('') || '<div class="empty">Pusty trening</div>'}
   </main>`;
-  $app.querySelectorAll('[data-fix]').forEach(b => b.onclick = () => { const [ei, si] = b.dataset.fix.split(':').map(Number); editSet(s.entries[ei].sets[si], () => renderSession(c, sid)); });
+  $app.querySelectorAll('[data-fix]').forEach(b => b.onclick = () => { const [ei, si] = b.dataset.fix.split(':').map(Number); const en = s.entries[ei], x = en.sets[si]; editSet(x, () => { for (const y of en.sets) if (y !== x && y.dup && y.raw === x.raw) { y.kg = x.kg; y.reps = x.reps; y.sec = x.sec; delete y.amb; delete y.why; } save(); renderSession(c, sid); }); });
   document.getElementById('sm').onclick = () => menu([
     { label: 'Edytuj serie', icon: '✏️', fn: () => go(`#/c/${c.id}/w/${s.id}`) },
     { label: 'Ustaw datę', icon: '📅', fn: () => prompt2('Data treningu', [{ k: 'd', label: 'Data (RRRR-MM-DD)', v: (s.date || new Date().toISOString()).slice(0, 10) }], o => { if (/^\d{4}-\d{2}-\d{2}$/.test(o.d)) { s.date = new Date(o.d + 'T12:00:00').toISOString(); save(); renderSession(c, sid); } else toast('Zły format daty'); }) },
@@ -598,7 +659,7 @@ function renderReview() {
   for (const c of DB.clients) {
     if (ui.reviewClient && c.id !== ui.reviewClient) continue;
     const byEx = new Map();
-    for (const s of c.sessions) for (const en of s.entries) en.sets.forEach(x => { if (x.amb) { const k = en.exId; if (!byEx.has(k)) byEx.set(k, []); byEx.get(k).push({ s, x }); } });
+    for (const s of c.sessions) for (const en of s.entries) en.sets.forEach(x => { if (x.amb && !x.dup) { const k = en.exId; if (!byEx.has(k)) byEx.set(k, []); byEx.get(k).push({ s, x, en }); } });
     for (const [exId, items] of byEx) groups.push({ c, exId, items });
   }
   const total = groups.reduce((a, g) => a + g.items.length, 0);
@@ -614,12 +675,15 @@ function renderReview() {
     ${g.items.length > 30 ? `<div class="tiny muted">+${g.items.length - 30} kolejnych (pokażą się po zatwierdzeniu)</div>` : ''}</div>`).join('')}
   ${groups.length > 40 ? `<div class="tiny muted">Pokazano 40 ćwiczeń z ${groups.length}</div>` : ''}</main>`;
   document.getElementById('rc').onchange = e => { ui.reviewClient = e.target.value; renderReview(); };
-  const swap = x => { const k = x.kg; x.kg = x.reps; x.reps = k; };
+  const swap1 = x => { const k = x.kg; x.kg = x.reps; x.reps = k; };
+  const sibs = it => it.en.sets.filter(y => y.dup && y.amb && y.raw === it.x.raw);
+  const swap = (x, it) => { swap1(x); if (it) for (const y of sibs(it)) { swap1(y); delete y.amb; delete y.why; } };
+  const okSibs = it => { for (const y of sibs(it)) { delete y.amb; delete y.why; } };
   const re = () => { save(); const sy = window.scrollY; renderReview(); window.scrollTo(0, sy); };
-  $app.querySelectorAll('[data-ga]').forEach(b => b.onclick = () => { const [gi, a] = b.dataset.ga.split(':'); for (const it of groups[+gi].items) { if (a === 'swap') swap(it.x); delete it.x.amb; delete it.x.why; } re(); });
+  $app.querySelectorAll('[data-ga]').forEach(b => b.onclick = () => { const [gi, a] = b.dataset.ga.split(':'); for (const it of groups[+gi].items) { if (a === 'swap') swap(it.x, it); else okSibs(it); delete it.x.amb; delete it.x.why; } re(); });
   $app.querySelectorAll('[data-it]').forEach(b => b.onclick = () => { const [gi, ii, a] = b.dataset.it.split(':'); const it = groups[+gi].items[+ii];
-    if (a === 'ed') return editSet(it.x, re);
-    if (a === 'swap') swap(it.x); delete it.x.amb; delete it.x.why; re(); });
+    if (a === 'ed') return editSet(it.x, () => { for (const y of sibs(it)) { y.kg = it.x.kg; y.reps = it.x.reps; y.sec = it.x.sec; delete y.amb; delete y.why; } re(); });
+    if (a === 'swap') swap(it.x, it); else okSibs(it); delete it.x.amb; delete it.x.why; re(); });
 }
 
 // ------------------------------------------------------------------ ustawienia
