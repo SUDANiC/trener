@@ -70,7 +70,8 @@ table.sets tr.done td:last-child{border-radius:0 8px 8px 0}
 .ck{width:38px;height:38px;border-radius:9px;background:var(--card2);border:1px solid var(--line);font-size:18px;color:var(--muted)}
 .ck.on{background:var(--ok);border-color:var(--ok);color:#06210f}
 .field{display:block;margin-bottom:12px}
-.field span{display:block;font-size:12px;color:var(--muted);margin:0 0 5px 2px;font-weight:600}
+.field span.chip{display:inline-flex}
+.field span:not(.chip){display:block;font-size:12px;color:var(--muted);margin:0 0 5px 2px;font-weight:600}
 .inp{width:100%;min-height:44px;border-radius:12px;border:1px solid var(--line);background:var(--card2);padding:10px 12px;outline:none}
 .inp:focus{border-color:var(--accent)}
 textarea.inp{min-height:110px;resize:vertical}
