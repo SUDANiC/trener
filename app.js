@@ -14,8 +14,9 @@ function load() {
 let saveT = null;
 function save(now) {
   clearTimeout(saveT);
+  if (DB) DB.savedAt = new Date().toISOString();
   const f = () => {
-    try { localStorage.setItem(KEY, JSON.stringify(DB)); }
+    try { localStorage.setItem(KEY, JSON.stringify(DB)); Drive.schedule(); }
     catch (e) { toast('Brak miejsca w pamięci – zrób eksport kopii!'); }
   };
   now ? f() : (saveT = setTimeout(f, 250));
@@ -144,7 +145,9 @@ function renderWelcome() {
   <div class="card"><h2 style="margin-top:0">Witaj 👋</h2>
   <p class="muted">Dane podopiecznych są przechowywane <b>wyłącznie na tym telefonie</b>. Wczytaj plik <b>podopieczni-dane.json</b> przygotowany z Twoich Exceli albo zacznij od zera.</p>
   <button class="btn p w" id="imp">📂 Wczytaj plik z danymi</button><div style="height:10px"></div>
+  <button class="btn w" id="gd">☁️ Pobierz dane z Dysku Google</button><div style="height:10px"></div>
   <button class="btn w" id="fresh">Zacznij od zera</button></div></main>`;
+  document.getElementById('gd').onclick = () => Drive.connect();
   document.getElementById('imp').onclick = pickImport;
   document.getElementById('fresh').onclick = () => { DB = { app: 'trener', version: 1, clients: [] }; save(true); render(); };
 }
@@ -198,7 +201,7 @@ function renderHome() {
   const list = DB.clients.filter(c => !c.archived && (!q || norm(c.name).includes(q)))
     .sort((a, b) => a.name.localeCompare(b.name, 'pl'));
   const arch = DB.clients.filter(c => c.archived);
-  $app.innerHTML = `${topBar('Podopieczni', { right: `<button class="ib" onclick="go('#/review')" aria-label="Do sprawdzenia">⚠️${amb ? `<span class="dot">${amb}</span>` : ''}</button><button class="ib" onclick="go('#/settings')" aria-label="Ustawienia">⚙️</button>` })}
+  $app.innerHTML = `${topBar('Podopieczni', { right: `${Drive.icon()}<button class="ib" onclick="go('#/review')" aria-label="Do sprawdzenia">⚠️${amb ? `<span class="dot">${amb}</span>` : ''}</button><button class="ib" onclick="go('#/settings')" aria-label="Ustawienia">⚙️</button>` })}
   <main><input class="search" id="q" placeholder="Szukaj podopiecznego…" value="${esc(ui.search)}">
   ${list.map(c => { const a = ambCount(c); return `<button class="card row" style="width:100%;text-align:left" onclick="go('#/c/${c.id}')">
     <div class="av" style="background:${colorFor(c.name)}">${esc(initials(c.name))}</div>
@@ -216,6 +219,7 @@ function renderHome() {
   });
 }
 function backupNag() {
+  if (Drive.connected) return '';
   const last = DB.lastBackup ? new Date(DB.lastBackup) : null;
   const days = last ? (Date.now() - last) / 864e5 : 999;
   if (days < 7) return '';
@@ -518,13 +522,15 @@ function renderReview() {
 function renderSettings() {
   let size = 0; try { size = (localStorage.getItem(KEY) || '').length; } catch (e) {}
   $app.innerHTML = `${topBar('Ustawienia', { back: 1 })}<main>
-  <div class="card"><b>💾 Kopia zapasowa</b><p class="small muted">Dane są tylko na tym telefonie. Eksport zapisuje plik .json w Pobranych – wyślij go sobie na maila/Dysk.${DB.lastBackup ? ' Ostatnia kopia: ' + fmtDate(DB.lastBackup) + '.' : ''}</p>
+  ${Drive.settingsCard()}
+  <div class="card"><b>💾 Kopia zapasowa</b><p class="small muted">Ręczna kopia niezależna od Dysku. Eksport zapisuje plik .json w Pobranych – wyślij go sobie na maila/Dysk.${DB.lastBackup ? ' Ostatnia kopia: ' + fmtDate(DB.lastBackup) + '.' : ''}</p>
   <button class="btn p w" onclick="exportData()">Eksportuj kopię (.json)</button><div style="height:8px"></div>
   <button class="btn w" onclick="pickImport()">Wczytaj plik z danymi / kopię</button></div>
   <div class="card"><b>⏱ Przerwa między seriami</b><div class="row" style="margin-top:8px">${[60, 90, 120, 180].map(v => `<button class="btn sm grow ${ui.restSec === v ? 'p' : ''}" data-rest="${v}">${v}s</button>`).join('')}</div></div>
   <div class="card small muted">Podopiecznych: ${DB.clients.length} · rozmiar danych: ${(size / 1024).toFixed(0)} KB${DB.importedAt ? ' · import z Excela: ' + fmtDate(DB.importedAt) : ''}</div>
   <div id="inst"></div>
   <button class="btn w danger" id="wipe">Usuń wszystkie dane z telefonu</button></main>`;
+  Drive.bindCard();
   $app.querySelectorAll('[data-rest]').forEach(b => b.onclick = () => { ui.restSec = +b.dataset.rest; saveUi(); renderSettings(); });
   document.getElementById('wipe').onclick = () => confirmBox('Usunąć WSZYSTKIE dane? Zrób najpierw kopię!', () => { localStorage.removeItem(KEY); DB = null; render(); }, 'Usuń wszystko');
   if (deferredInstall) { const i = document.getElementById('inst'); i.innerHTML = `<button class="btn p w" style="margin-bottom:10px">📲 Zainstaluj aplikację</button>`; i.firstChild.onclick = () => { deferredInstall.prompt(); deferredInstall = null; }; }
@@ -535,5 +541,7 @@ let deferredInstall = null;
 window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); deferredInstall = e; });
 if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+Drive.handleRedirect();
 load();
 render();
+Drive.init();
