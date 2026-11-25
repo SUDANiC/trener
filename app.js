@@ -79,7 +79,10 @@ function lastFor(c, ex, skipSid, member, any) { // ostatnie wykonanie ćwiczenia
   return null;
 }
 function prevSets(l) { return l ? l.en.sets.filter(cleanSet) : []; }
-function bestKg(en) { let m = null; for (const x of en.sets) if (typeof x.kg === 'number' && (m == null || x.kg > m)) m = x.kg; return m; }
+const STYPES = { w: ['W', 'Rozgrzewkowa', 'var(--warn)'], f: ['F', 'Do upadku', 'var(--bad)'], d: ['D', 'Drop set', '#c084fc'] };
+function setLabel(sets, si) { const x = sets[si]; if (x.type && STYPES[x.type]) return STYPES[x.type][0]; return String(sets.slice(0, si + 1).filter(y => y.type !== 'w').length); }
+function setLabelHtml(sets, si) { const t = sets[si].type; return `<span style="color:${t && STYPES[t] ? STYPES[t][2] : 'inherit'}">${setLabel(sets, si)}</span>`; }
+function bestKg(en) { let m = null; for (const x of en.sets) if (x.type !== 'w' && typeof x.kg === 'number' && (m == null || x.kg > m)) m = x.kg; return m; }
 function allExerciseNames() {
   const set = new Map();
   for (const c of DB.clients) for (const p of c.plans) for (const e of p.exercises) { const k = norm(e.name); if (!set.has(k)) set.set(k, e.name); }
@@ -439,9 +442,10 @@ function memberChip(c, m) { return m ? `<span class="chip" style="border-color:$
 function buildEntries(c, p, member) {
   return p.exercises.map(e => {
     const l = lastFor(c, e, null, member);
-    const prev = prevSets(l);
+    const all = prevSets(l), warm = all.filter(x => x.type === 'w'), prev = all.filter(x => x.type !== 'w');
     const n = (e.target && e.target.sets) || (prev.length ? Math.min(prev.length, 6) : 3);
-    return { exId: e.id, member: member || null, sets: Array.from({ length: n }, (_, i) => { const pv = prev[i] || prev[prev.length - 1] || {}; return { kg: pv.kg ?? null, reps: pv.reps ?? null, sec: pv.sec ?? null, done: false, ph: true }; }) };
+    const mk = (pv, type) => { const o = { kg: pv.kg ?? null, reps: pv.reps ?? null, sec: pv.sec ?? null, done: false, ph: true }; if (type) o.type = type; return o; };
+    return { exId: e.id, member: member || null, sets: warm.map(w => mk(w, 'w')).concat(Array.from({ length: n }, (_, i) => { const pv = prev[i] || prev[prev.length - 1] || {}; return mk(pv, pv.type && pv.type !== 'w' ? pv.type : null); })) };
   });
 }
 function startWorkout(cid, pid) {
@@ -487,7 +491,7 @@ function renderWorkout(c, sid) {
   const group = s.members && s.members.length > 1;
   ui.wview = ui.wview || {};
   const view = group ? (ui.wview[s.id] || 'all') : 'all';
-  const prevOf = (en, i) => { const ex = exById(c, en.exId) || { id: en.exId, name: '' }; const x = prevSets(lastFor(c, ex, s.id, entryMember(s, en)))[i]; return x ? setPlain(x) : '–'; };
+  const prevOf = (en, i) => { const ex = exById(c, en.exId) || { id: en.exId, name: '' }; const ps = prevSets(lastFor(c, ex, s.id, entryMember(s, en))); const w = en.sets[i].type === 'w'; const ord = en.sets.slice(0, i).filter(y => (y.type === 'w') === w).length; const x = ps.filter(y => (y.type === 'w') === w)[ord]; return x ? setPlain(x) : '–'; };
   const subHint = en => { // ostatnio była zamiana / dopisek – pokaż jako informację
     const ex = exById(c, en.exId); if (!ex) return '';
     const a = lastFor(c, ex, s.id, entryMember(s, en), true), cl = lastFor(c, ex, s.id, entryMember(s, en));
@@ -504,7 +508,7 @@ function renderWorkout(c, sid) {
     ${swapLbl(en)}${subHint(en)}
     ${en.note != null ? `<input class="inp small" data-note="${ei}" placeholder="Notatka do ćwiczenia" value="${esc(en.note)}" style="min-height:36px;margin-bottom:8px">` : ''}
     <table class="sets"><tr><th>Seria</th><th>Poprzednio</th><th>kg</th><th>Powt</th><th>✓</th></tr>
-    ${en.sets.map((x, si) => `<tr class="${x.done ? 'done' : ''}"><td class="sn">${si + 1}</td><td class="prev">${esc(prevOf(en, si))}</td>
+    ${en.sets.map((x, si) => `<tr class="${x.done ? 'done' : ''}"><td><button class="snb" data-st="${ei}:${si}">${setLabelHtml(en.sets, si)}</button></td><td class="prev">${esc(prevOf(en, si))}</td>
     <td><input class="num" inputmode="decimal" data-e="${ei}" data-s="${si}" data-f="kg" value="${x.ph ? '' : fmtNum(x.kg)}" placeholder="${x.ph ? fmtNum(x.kg) : ''}"></td>
     <td><input class="num" inputmode="decimal" data-e="${ei}" data-s="${si}" data-f="reps" value="${x.ph ? '' : fmtNum(x.reps)}" placeholder="${x.ph ? (x.sec ? x.sec + 's' : fmtNum(x.reps)) : ''}"></td>
     <td><button class="ck ${x.done ? 'on' : ''}" data-ck="${ei}:${si}">✓</button></td></tr>`).join('')}</table>
@@ -551,6 +555,15 @@ function renderWorkout(c, sid) {
     if (x.done && s.live) startRest();
     rerender();
   });
+  $app.querySelectorAll('[data-st]').forEach(b => b.onclick = () => {
+    const [ei, si] = b.dataset.st.split(':').map(Number), en = s.entries[ei], x = en.sets[si];
+    const setT = t => { if (t) x.type = t; else delete x.type; save(); rerender(); };
+    menu([{ label: 'Seria rozgrzewkowa', icon: '🟠 W', fn: () => setT('w') },
+          { label: 'Seria robocza', icon: '🔢', fn: () => setT(null) },
+          { label: 'Do upadku', icon: '🔴 F', fn: () => setT('f') },
+          { label: 'Drop set', icon: '🟣 D', fn: () => setT('d') },
+          { label: `Usuń serię ${setLabel(en.sets, si)}`, icon: '🗑️', danger: 1, fn: () => { en.sets.splice(si, 1); save(); rerender(); } }]);
+  });
   $app.querySelectorAll('[data-add]').forEach(b => b.onclick = () => { const en = s.entries[+b.dataset.add]; const last = en.sets[en.sets.length - 1] || {}; en.sets.push({ kg: last.kg ?? null, reps: last.reps ?? null, done: false, ph: true }); save(); rerender(); });
   $app.querySelectorAll('[data-exm]').forEach(b => b.onclick = () => { const ei = +b.dataset.exm, en = s.entries[ei];
     menu([{ label: 'Zamień ćwiczenie (tylko dziś)', icon: '↔️', fn: () => prompt2('Zamień na', [{ k: 'name', label: 'Ćwiczenie zastępcze', list: 1, ph: 'np. Rzuty piłką lekarską w bok' }], o => {
@@ -592,7 +605,7 @@ function renderWorkout(c, sid) {
     for (const en of s.entries) for (const x of en.sets) delete x.ph;
     s.entries = s.entries.filter(en => en.sets.length || en.note);
     if (s.live) { s.dur = Math.round((Date.now() - s.start) / 60000); delete s.live; }
-    stopRest(); save(true); toast('Trening zapisany 💪'); go(`#/c/${c.id}/s/${s.id}`);
+    stopRest(); save(true); ui.justDone = s.id; location.replace(`#/c/${c.id}/s/${s.id}`);
   };
   const d = document.getElementById('discard'); if (d) d.onclick = () => confirmBox('Odrzucić ten trening?', () => { c.sessions = c.sessions.filter(x => x !== s); stopRest(); save(true); go('#/c/' + c.id); }, 'Odrzuć');
   bindRest();
@@ -616,13 +629,22 @@ function bindRest() {
 function renderSession(c, sid) {
   const s = c.sessions.find(x => x.id === sid); if (!s) return go('#/c/' + c.id);
   if (s.live) return go(`#/c/${c.id}/w/${s.id}`);
-  $app.innerHTML = `${topBar(esc(sessTitle(s, c)), { back: 1, right: `<button class="ib" id="sm">⋯</button>` })}<main>
+  const done = ui.justDone === s.id;
+  let nSets = 0, vol = 0; for (const en of s.entries) for (const x of en.sets) if (x.type !== 'w') { nSets++; if (typeof x.kg === 'number' && typeof x.reps === 'number') vol += x.kg * x.reps; }
+  $app.innerHTML = `${topBar(esc(sessTitle(s, c)), { back: done ? 0 : 1, right: `<button class="ib" id="sm">⋯</button>` })}<main>
+  ${done ? `<div class="card" style="border-color:var(--ok)"><div style="font-weight:800;font-size:18px">Trening zapisany 💪</div>
+    <div class="row" style="margin:10px 0"><div class="stat"><b>${s.dur || 0} min</b><span class="tiny muted">czas</span></div><div class="stat"><b>${nSets}</b><span class="tiny muted">serie robocze</span></div><div class="stat"><b>${fmtNum(Math.round(vol))} kg</b><span class="tiny muted">objętość</span></div></div>
+    <div class="row"><button class="btn p grow" id="toc">👤 ${esc(c.name.split(' ')[0])}</button><button class="btn grow" id="toh">🏠 Ekran główny</button></div></div>` : ''}
   <div class="small muted" style="margin-bottom:10px">${sessWhen(s, c)}${s.dur ? ` · ${s.dur} min` : ''}</div>
   ${s.entries.map((en, ei) => `<div class="card"><div class="ex-h"><div class="ex-ic">🏋️</div><div class="grow"><div class="ex-n">${esc(exName(c, en.exId))}</div>${en.swapFor ? `<div class="tiny muted">zamiast: ${esc(exName(c, en.swapFor))}</div>` : ''}</div>${s.members && en.member ? memberChip(c, en.member) : ''}</div>
-  ${en.sets.map((x, si) => `<div class="row small" style="padding:4px 0"><span class="sn muted">${si + 1}</span><div class="grow">${setText(x) || '<span class="muted">–</span>'}</div>${x.amb ? `<button class="chip warn" data-fix="${ei}:${si}">? sprawdź</button>` : `<button class="ib" data-fix="${ei}:${si}" style="width:32px;height:32px;font-size:14px">✏️</button>`}</div>`).join('')}
+  ${en.sets.map((x, si) => `<div class="row small" style="padding:4px 0"><span class="sn muted">${setLabelHtml(en.sets, si)}</span><div class="grow">${setText(x) || '<span class="muted">–</span>'}</div>${x.amb ? `<button class="chip warn" data-fix="${ei}:${si}">? sprawdź</button>` : `<button class="ib" data-fix="${ei}:${si}" style="width:32px;height:32px;font-size:14px">✏️</button>`}</div>`).join('')}
   ${en.note ? `<div class="tiny muted">📝 ${esc(en.note)}</div>` : ''}</div>`).join('') || '<div class="empty">Pusty trening</div>'}
   </main>`;
   $app.querySelectorAll('[data-fix]').forEach(b => b.onclick = () => { const [ei, si] = b.dataset.fix.split(':').map(Number); const en = s.entries[ei], x = en.sets[si]; editSet(x, () => { for (const y of en.sets) if (y !== x && y.dup && y.raw === x.raw) { y.kg = x.kg; y.reps = x.reps; y.sec = x.sec; delete y.amb; delete y.why; } save(); renderSession(c, sid); }); });
+  if (done) {
+    document.getElementById('toc').onclick = () => { ui.justDone = null; location.replace('#/c/' + c.id); };
+    document.getElementById('toh').onclick = () => { ui.justDone = null; location.replace('#/'); };
+  }
   document.getElementById('sm').onclick = () => menu([
     { label: 'Edytuj serie', icon: '✏️', fn: () => go(`#/c/${c.id}/w/${s.id}`) },
     { label: 'Ustaw datę', icon: '📅', fn: () => prompt2('Data treningu', [{ k: 'd', label: 'Data (RRRR-MM-DD)', v: (s.date || new Date().toISOString()).slice(0, 10) }], o => { if (/^\d{4}-\d{2}-\d{2}$/.test(o.d)) { s.date = new Date(o.d + 'T12:00:00').toISOString(); save(); renderSession(c, sid); } else toast('Zły format daty'); }) },
