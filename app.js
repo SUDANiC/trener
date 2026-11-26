@@ -119,15 +119,12 @@ function reorderModal(title, items, onSave) {
   modal('', m => draw(m));
 }
 // biblioteka ćwiczeń
-const EXDB_URL = 'https://cdn.jsdelivr.net/gh/yuhonas/free-exercise-db@main/dist/exercises.json';
 const EXDB_IMG = 'https://cdn.jsdelivr.net/gh/yuhonas/free-exercise-db@main/exercises/';
 let EXDB = null;
 async function loadExdb() {
   if (EXDB) return EXDB;
-  let r = null;
-  try { const cache = await caches.open('trener-exdb'); r = await cache.match(EXDB_URL); if (!r) { const net = await fetch(EXDB_URL); if (!net.ok) throw new Error(net.status); await cache.put(EXDB_URL, net.clone()); r = net; } }
-  catch (e) { const net = await fetch(EXDB_URL); if (!net.ok) throw new Error('Baza niedostępna'); r = net; }
-  EXDB = await r.json(); return EXDB;
+  const r = await fetch('exdb-pl.json'); if (!r.ok) throw new Error('Baza niedostępna');
+  EXDB = (await r.json()).ex; return EXDB;
 }
 function libraryPick(onPick) {
   let cat = 'Twoje', q = '';
@@ -135,33 +132,43 @@ function libraryPick(onPick) {
     for (const cl of DB.clients) for (const ex of cl.plans.flatMap(p => p.exercises).concat(cl.extraEx || [])) { const k = norm(ex.name); if (seen.has(k)) continue; seen.add(k); out.push({ name: ex.name, cat: 'Twoje', mode: ex.mode || exMode(cl, ex) }); }
     return out.sort((a, b) => a.name.localeCompare(b.name, 'pl')); };
   const pl = () => EXLIB.map(([c, n, m]) => ({ name: n, cat: c, mode: m }));
-  const onl = () => (EXDB || []).map(e => ({ name: e.name, cat: 'Online', mode: e.category === 'cardio' || e.category === 'stretching' ? 't' : e.equipment === 'body only' || !e.equipment ? 'r' : 'kgr', img: e.images && e.images[0], sub: [e.equipment, (e.primaryMuscles || []).join(', ')].filter(Boolean).join(' · ') }));
-  modal(`<h3>Biblioteka ćwiczeń</h3><input class="search" id="lq" placeholder="Szukaj (np. przysiad, wiosło, plank)…" style="margin-bottom:8px">
+  const db = () => (EXDB || []).map(e => ({ name: e.n, cat: e.c, mode: e.md, img: e.img && e.img[0], img2: e.img && e.img[1], sub: [e.eq, e.m.join(', ')].filter(Boolean).join(' · '), extra: e.en + ' ' + e.m.concat(e.m2).join(' ') + ' ' + e.eq, main: e.en + ' ' + e.m.join(' ') + ' ' + e.eq, ex: e }));
+  const DBTAB = '📷 Baza 876';
+  modal(`<h3>Biblioteka ćwiczeń</h3><input class="search" id="lq" placeholder="Szukaj: nazwa, mięsień, sprzęt (np. pośladki, hantle)…" style="margin-bottom:8px">
     <div class="tabs" id="lcat"></div><div id="lres"></div>`, (m, close) => {
     const res = m.querySelector('#lres'), qi = m.querySelector('#lq'), cats = m.querySelector('#lcat');
-    const drawCats = () => { cats.innerHTML = ['Twoje', 'Wszystkie'].concat(EXLIB_CATS, ['🌐 Online (EN)']).map(k => `<button class="tab ${k === cat ? 'on' : ''}" data-c="${esc(k)}">${esc(k)}</button>`).join('');
+    const drawCats = () => { cats.innerHTML = ['Twoje', 'Wszystkie', DBTAB].concat(EXLIB_CATS).map(k => `<button class="tab ${k === cat ? 'on' : ''}" data-c="${esc(k)}">${esc(k)}</button>`).join('');
       cats.querySelectorAll('[data-c]').forEach(b => b.onclick = () => { cat = b.dataset.c; drawCats(); draw(); }); };
     const draw = async () => {
+      if (!EXDB && (cat === DBTAB || cat === 'Wszystkie')) { res.innerHTML = '<div class="empty">Ładuję bazę…</div>'; try { await loadExdb(); } catch (e) { if (cat === DBTAB) { res.innerHTML = '<div class="empty">Nie udało się wczytać bazy</div>'; return; } } }
       let src;
-      if (cat === '🌐 Online (EN)') {
-        if (!EXDB) { res.innerHTML = '<div class="empty">Ładuję bazę 870+ ćwiczeń…</div>'; try { await loadExdb(); } catch (e) { res.innerHTML = '<div class="empty">Brak połączenia z bazą online</div>'; return; } }
-        src = onl();
-      } else if (cat === 'Twoje') src = own();
-      else if (cat === 'Wszystkie') src = own().concat(pl());
-      else src = pl().filter(x => x.cat === cat);
+      if (cat === DBTAB) src = db();
+      else if (cat === 'Twoje') src = own();
+      else if (cat === 'Wszystkie') src = own().concat(pl(), db());
+      else src = pl().filter(x => x.cat === cat).concat(db().filter(x => x.ex && EXLIB_MAP[cat] && EXLIB_MAP[cat].some(mm => x.ex.m.includes(mm))));
       const toks = fold(q).split(/\s+/).filter(Boolean);
       const seen = new Set();
-      const hits = src.filter(x => { const f = fold(x.name); if (seen.has(f)) return false; seen.add(f); return toks.every(t => f.includes(t)); }).slice(0, 120);
+      const rank = x => { const main = fold(x.name) + ' ' + fold(x.main || ''); return toks.every(t => main.includes(t)) ? 0 : 1; };
+      const hits = src.filter(x => { const f = fold(x.name); if (seen.has(f)) return false; seen.add(f); const hay = f + ' ' + fold(x.extra || ''); return toks.every(t => hay.includes(t)); })
+        .map((x, i) => [x, i]).sort((A, B) => rank(A[0]) - rank(B[0]) || A[1] - B[1]).map(([x]) => x).slice(0, 150);
       const canAdd = q.trim() && !hits.some(h => fold(h.name) === fold(q.trim()));
       res.innerHTML = (canAdd ? `<div class="list-i" data-new="1"><div class="grow"><b>＋ Nowe: „${esc(q.trim())}”</b></div></div>` : '') +
-        hits.map((x, i) => `<div class="list-i" data-i="${i}">${x.img ? `<img src="${EXDB_IMG + x.img}" loading="lazy" style="width:48px;height:48px;object-fit:cover;border-radius:8px;background:#fff">` : ''}<div class="grow"><div>${esc(x.name)}</div><div class="tiny muted">${esc(x.sub || (x.cat !== 'Twoje' ? x.cat : 'z Twoich planów'))}${x.mode ? ' · ' + MODES[x.mode][0] : ''}</div></div></div>`).join('') || '<div class="empty">Brak wyników</div>';
-      res.querySelectorAll('[data-i]').forEach(el => el.onclick = () => { close(); onPick(hits[+el.dataset.i]); });
+        hits.map((x, i) => `<div class="list-i" data-i="${i}">${x.img ? `<img src="${EXDB_IMG + x.img}" loading="lazy" style="width:52px;height:52px;object-fit:cover;border-radius:8px;background:#fff;flex:none">` : ''}<div class="grow"><div>${esc(x.name)}</div><div class="tiny muted">${esc(x.sub || (x.cat !== 'Twoje' ? x.cat : 'z Twoich planów'))}${x.mode ? ' · ' + MODES[x.mode][0] : ''}</div></div>${x.ex ? `<button class="ib" data-inf="${i}">ℹ️</button>` : ''}</div>`).join('') || '<div class="empty">Brak wyników</div>';
+      res.querySelectorAll('[data-i]').forEach(el => el.onclick = e => { if (e.target.closest('[data-inf]')) return; close(); onPick(hits[+el.dataset.i]); });
+      res.querySelectorAll('[data-inf]').forEach(b => b.onclick = () => { const x = hits[+b.dataset.inf], e = x.ex;
+        modal(`<h3>${esc(e.n)}</h3><div class="tiny muted" style="margin-bottom:8px">${esc(e.en)}</div>
+          <div class="row" style="gap:6px">${e.img.map(im => `<img src="${EXDB_IMG + im}" style="width:50%;border-radius:10px;background:#fff">`).join('')}</div>
+          <p class="small"><b>Mięśnie:</b> ${esc(e.m.join(', '))}${e.m2.length ? `<br><span class="muted">pomocniczo: ${esc(e.m2.join(', '))}</span>` : ''}<br><b>Sprzęt:</b> ${esc(e.eq)} · <b>Poziom:</b> ${esc(e.l)} · <b>Zapis:</b> ${MODES[e.md][0]}</p>
+          <div class="row"><button class="btn grow" data-x>Wróć</button><button class="btn p grow" data-y>Wybierz</button></div>`, (mm, cl2) => {
+          mm.querySelector('[data-x]').onclick = cl2; mm.querySelector('[data-y]').onclick = () => { cl2(); close(); onPick(x); }; }); });
       const nw = res.querySelector('[data-new]'); if (nw) nw.onclick = () => { close(); onPick({ name: q.trim(), mode: null }); };
     };
     qi.oninput = () => { q = qi.value; if (q && cat === 'Twoje' && !own().some(x => fold(x.name).includes(fold(q)))) { cat = 'Wszystkie'; drawCats(); } draw(); };
     drawCats(); draw(); setTimeout(() => qi.focus(), 50);
   });
 }
+// kategorie polskiej listy ↔ mięśnie w bazie ze zdjęciami
+const EXLIB_MAP = { Nogi: ['czworogłowe uda', 'dwugłowe uda', 'łydki', 'przywodziciele', 'odwodziciele'], Pośladki: ['pośladki', 'dwugłowe uda'], Plecy: ['najszersze grzbietu', 'środek pleców', 'dolny odcinek pleców', 'czworoboczne'], Klatka: ['klatka'], Barki: ['barki'], Ramiona: ['biceps', 'triceps', 'przedramiona'], Core: ['brzuch'], Kondycja: [], Mobilność: [] };
 const STYPES = { w: ['W', 'Rozgrzewkowa', 'var(--warn)'], f: ['F', 'Do upadku', 'var(--bad)'], d: ['D', 'Drop set', '#c084fc'] };
 function setLabel(sets, si) { const x = sets[si]; if (x.type && STYPES[x.type]) return STYPES[x.type][0]; return String(sets.slice(0, si + 1).filter(y => y.type !== 'w').length); }
 function setLabelHtml(sets, si) { const t = sets[si].type; return `<span style="color:${t && STYPES[t] ? STYPES[t][2] : 'inherit'}">${setLabel(sets, si)}</span>`; }
