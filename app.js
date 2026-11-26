@@ -120,7 +120,25 @@ function reorderModal(title, items, onSave) {
 }
 // biblioteka ćwiczeń
 const EXDB_IMG = 'https://cdn.jsdelivr.net/gh/yuhonas/free-exercise-db@main/exercises/';
-let EXDB = null;
+let EXDB = null, REPDB = null;
+const REPDB_BASE = 'https://exercise-dataset.com/';
+async function loadRepdb() { // ilustracje RepDB: dane pobierane od autora, polskie nazwy z pliku aplikacji
+  if (REPDB) return REPDB;
+  const url = REPDB_BASE + 'exercises.json';
+  let r = null;
+  try { const cache = await caches.open('trener-repdb'); r = await cache.match(url); if (!r) { const net = await fetch(url); if (!net.ok) throw new Error(net.status); await cache.put(url, net.clone()); r = net; } }
+  catch (e) { r = await fetch(url); if (!r.ok) throw new Error('Ilustracje niedostępne'); }
+  const [data, pl] = await Promise.all([r.json(), fetch('repdb-pl.json').then(x => x.json())]);
+  REPDB = data.exercises.map(e => {
+    const fl = (e.images && e.images.flat) || {}, im = fl.peak || fl.main || fl.start, im2 = fl.start && fl.peak ? fl.start : null;
+    const id = e.id, hold = /hold|hang|plank|sit$|pose|stretch|savasana|stand$|stance|lever|planche|flag|bridge-hold/.test(id);
+    const carry = /carry|walk$|farmers/.test(id);
+    const md = e.category === 'stretching' || e.category === 'cardio' || hold ? (hold && !e.is_bodyweight ? 'kgt' : 't') : carry ? 'kgt' : e.is_bodyweight ? 'r' : 'kgr';
+    const mu = k => (e[k] || []).map(m => pl.muscles[m] || m.replace(/_/g, ' '));
+    return { n: pl.names[id] || e.name_en, en: e.name_en, c: pl.body[e.body_part] || '', cat: pl.cat[e.category] || e.category, m: mu('primary_muscles'), m2: mu('secondary_muscles'), l: pl.lvl[e.difficulty] || '', img: im ? REPDB_BASE + im : null, img2: im2 ? REPDB_BASE + im2 : null, md, tips: e.tips_en || [], steps: e.instructions_en || [] };
+  });
+  return REPDB;
+}
 async function loadExdb() {
   if (EXDB) return EXDB;
   const r = await fetch('exdb-pl.json'); if (!r.ok) throw new Error('Baza niedostępna');
@@ -133,19 +151,24 @@ function libraryPick(onPick) {
     return out.sort((a, b) => a.name.localeCompare(b.name, 'pl')); };
   const pl = () => EXLIB.map(([c, n, m]) => ({ name: n, cat: c, mode: m }));
   const db = () => (EXDB || []).map(e => ({ name: e.n, cat: e.c, mode: e.md, img: e.img && e.img[0], img2: e.img && e.img[1], sub: [e.eq, e.m.join(', ')].filter(Boolean).join(' · '), extra: e.en + ' ' + e.m.concat(e.m2).join(' ') + ' ' + e.eq, main: e.en + ' ' + e.m.join(' ') + ' ' + e.eq, ex: e }));
-  const DBTAB = '📷 Baza 876';
+  const DBTAB = '📷 Zdjęcia (876)', ILTAB = '🎨 Ilustracje (708)';
+  const il = () => (REPDB || []).map(e => ({ name: e.n, cat: e.c, mode: e.md, imgUrl: e.img, sub: [e.c, e.m.join(', ')].filter(Boolean).join(' · '), extra: e.en + ' ' + e.m.concat(e.m2).join(' ') + ' ' + e.cat, main: e.en + ' ' + e.m.join(' ') + ' ' + e.c, rep: e }));
   modal(`<h3>Biblioteka ćwiczeń</h3><input class="search" id="lq" placeholder="Szukaj: nazwa, mięsień, sprzęt (np. pośladki, hantle)…" style="margin-bottom:8px">
     <div class="tabs" id="lcat"></div><div id="lres"></div>`, (m, close) => {
     const res = m.querySelector('#lres'), qi = m.querySelector('#lq'), cats = m.querySelector('#lcat');
-    const drawCats = () => { cats.innerHTML = ['Twoje', 'Wszystkie', DBTAB].concat(EXLIB_CATS).map(k => `<button class="tab ${k === cat ? 'on' : ''}" data-c="${esc(k)}">${esc(k)}</button>`).join('');
+    const drawCats = () => { cats.innerHTML = ['Twoje', 'Wszystkie', ILTAB, DBTAB].concat(EXLIB_CATS).map(k => `<button class="tab ${k === cat ? 'on' : ''}" data-c="${esc(k)}">${esc(k)}</button>`).join('');
       cats.querySelectorAll('[data-c]').forEach(b => b.onclick = () => { cat = b.dataset.c; drawCats(); draw(); }); };
     const draw = async () => {
-      if (!EXDB && (cat === DBTAB || cat === 'Wszystkie')) { res.innerHTML = '<div class="empty">Ładuję bazę…</div>'; try { await loadExdb(); } catch (e) { if (cat === DBTAB) { res.innerHTML = '<div class="empty">Nie udało się wczytać bazy</div>'; return; } } }
+      if (!REPDB && cat !== 'Twoje' && cat !== DBTAB) { res.innerHTML = '<div class="empty">Ładuję ilustracje…</div>'; try { await loadRepdb(); } catch (e) { if (cat === ILTAB) { res.innerHTML = '<div class="empty">Ilustracje potrzebują internetu przy pierwszym otwarciu</div>'; return; } } }
+      if (!EXDB && (cat === DBTAB || cat === 'Wszystkie' || EXLIB_MAP[cat])) { try { await loadExdb(); } catch (e) { if (cat === DBTAB) { res.innerHTML = '<div class="empty">Nie udało się wczytać bazy</div>'; return; } } }
+      const ilNames = new Set(il().map(x => fold(x.name)));
+      const dbU = () => db().filter(x => !ilNames.has(fold(x.name)));   // zdjęcia tylko dla ćwiczeń bez ilustracji
       let src;
-      if (cat === DBTAB) src = db();
+      if (cat === ILTAB) src = il();
+      else if (cat === DBTAB) src = db();
       else if (cat === 'Twoje') src = own();
-      else if (cat === 'Wszystkie') src = own().concat(pl(), db());
-      else src = pl().filter(x => x.cat === cat).concat(db().filter(x => x.ex && EXLIB_MAP[cat] && EXLIB_MAP[cat].some(mm => x.ex.m.includes(mm))));
+      else if (cat === 'Wszystkie') src = own().concat(il(), pl(), dbU());
+      else src = il().filter(x => x.rep && (x.rep.c === cat || (EXLIB_MAP[cat] || []).some(mm => x.rep.m.join(' ').includes(mm.split(' ')[0])))).concat(pl().filter(x => x.cat === cat), dbU().filter(x => x.ex && EXLIB_MAP[cat] && EXLIB_MAP[cat].some(mm => x.ex.m.includes(mm))));
       const toks = fold(q).split(/\s+/).filter(Boolean);
       const seen = new Set();
       const rank = x => { const main = fold(x.name) + ' ' + fold(x.main || ''); return toks.every(t => main.includes(t)) ? 0 : 1; };
@@ -153,9 +176,18 @@ function libraryPick(onPick) {
         .map((x, i) => [x, i]).sort((A, B) => rank(A[0]) - rank(B[0]) || A[1] - B[1]).map(([x]) => x).slice(0, 150);
       const canAdd = q.trim() && !hits.some(h => fold(h.name) === fold(q.trim()));
       res.innerHTML = (canAdd ? `<div class="list-i" data-new="1"><div class="grow"><b>＋ Nowe: „${esc(q.trim())}”</b></div></div>` : '') +
-        hits.map((x, i) => `<div class="list-i" data-i="${i}">${x.img ? `<img src="${EXDB_IMG + x.img}" loading="lazy" style="width:52px;height:52px;object-fit:cover;border-radius:8px;background:#fff;flex:none">` : ''}<div class="grow"><div>${esc(x.name)}</div><div class="tiny muted">${esc(x.sub || (x.cat !== 'Twoje' ? x.cat : 'z Twoich planów'))}${x.mode ? ' · ' + MODES[x.mode][0] : ''}</div></div>${x.ex ? `<button class="ib" data-inf="${i}">ℹ️</button>` : ''}</div>`).join('') || '<div class="empty">Brak wyników</div>';
+        hits.map((x, i) => `<div class="list-i" data-i="${i}">${x.imgUrl || x.img ? `<img src="${x.imgUrl || EXDB_IMG + x.img}" loading="lazy" style="width:52px;height:52px;object-fit:cover;border-radius:10px;background:#dbeefa;flex:none">` : ''}<div class="grow"><div>${esc(x.name)}</div><div class="tiny muted">${esc(x.sub || (x.cat !== 'Twoje' ? x.cat : 'z Twoich planów'))}${x.mode ? ' · ' + MODES[x.mode][0] : ''}</div></div>${x.ex || x.rep ? `<button class="ib" data-inf="${i}">ℹ️</button>` : ''}</div>`).join('') || '<div class="empty">Brak wyników</div>';
+      res.insertAdjacentHTML('beforeend', `<div class="tiny muted" style="text-align:center;padding:14px 0 4px">Ilustracje: Exercise data by <a href="https://repdb.co" target="_blank" rel="noopener">RepDB (repdb.co)</a> · zdjęcia: free-exercise-db</div>`);
       res.querySelectorAll('[data-i]').forEach(el => el.onclick = e => { if (e.target.closest('[data-inf]')) return; close(); onPick(hits[+el.dataset.i]); });
-      res.querySelectorAll('[data-inf]').forEach(b => b.onclick = () => { const x = hits[+b.dataset.inf], e = x.ex;
+      res.querySelectorAll('[data-inf]').forEach(b => b.onclick = () => { const x = hits[+b.dataset.inf];
+        if (x.rep) { const e = x.rep;
+          return modal(`<h3>${esc(e.n)}</h3><div class="tiny muted" style="margin-bottom:8px">${esc(e.en)}</div>
+          <div class="row" style="gap:6px">${[e.img2, e.img].filter(Boolean).map(u => `<img src="${u}" style="width:${e.img2 ? 50 : 100}%;border-radius:12px;background:#dbeefa">`).join('')}</div>
+          <p class="small"><b>Mięśnie:</b> ${esc(e.m.join(', '))}${e.m2.length ? `<br><span class="muted">pomocniczo: ${esc(e.m2.join(', '))}</span>` : ''}<br><b>Partia:</b> ${esc(e.c)} · <b>Poziom:</b> ${esc(e.l)} · <b>Zapis:</b> ${MODES[e.md][0]}</p>
+          <div class="tiny muted" style="margin-bottom:10px">Exercise data by <a href="https://repdb.co" target="_blank" rel="noopener">RepDB (repdb.co)</a></div>
+          <div class="row"><button class="btn grow" data-x>Wróć</button><button class="btn p grow" data-y>Wybierz</button></div>`, (mm, cl2) => {
+          mm.querySelector('[data-x]').onclick = cl2; mm.querySelector('[data-y]').onclick = () => { cl2(); close(); onPick(x); }; }); }
+        const e = x.ex;
         modal(`<h3>${esc(e.n)}</h3><div class="tiny muted" style="margin-bottom:8px">${esc(e.en)}</div>
           <div class="row" style="gap:6px">${e.img.map(im => `<img src="${EXDB_IMG + im}" style="width:50%;border-radius:10px;background:#fff">`).join('')}</div>
           <p class="small"><b>Mięśnie:</b> ${esc(e.m.join(', '))}${e.m2.length ? `<br><span class="muted">pomocniczo: ${esc(e.m2.join(', '))}</span>` : ''}<br><b>Sprzęt:</b> ${esc(e.eq)} · <b>Poziom:</b> ${esc(e.l)} · <b>Zapis:</b> ${MODES[e.md][0]}</p>
@@ -836,6 +868,7 @@ function renderSettings() {
   <button class="btn p w" onclick="exportData()">Eksportuj kopię (.json)</button><div style="height:8px"></div>
   <button class="btn w" onclick="pickImport()">Wczytaj plik z danymi / kopię</button></div>
   <div class="card"><b>⏱ Przerwa między seriami</b><div class="row" style="margin-top:8px">${[60, 90, 120, 180].map(v => `<button class="btn sm grow ${ui.restSec === v ? 'p' : ''}" data-rest="${v}">${v}s</button>`).join('')}</div></div>
+  <div class="card small muted">Źródła bazy ćwiczeń: ilustracje – Exercise data by <a href="https://repdb.co" target="_blank" rel="noopener">RepDB (repdb.co)</a>; zdjęcia – free-exercise-db (domena publiczna).</div>
   <div class="card small muted">Podopiecznych: ${DB.clients.length} · rozmiar danych: ${(size / 1024).toFixed(0)} KB${DB.importedAt ? ' · import z Excela: ' + fmtDate(DB.importedAt) : ''}</div>
   <div id="inst"></div>
   <button class="btn w danger" id="wipe">Usuń wszystkie dane z telefonu</button></main>`;
