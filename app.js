@@ -199,6 +199,27 @@ function libraryPick(onPick) {
     drawCats(); draw(); setTimeout(() => qi.focus(), 50);
   });
 }
+let LIBIDX = null;
+function libIndex() { // nazwa (fold) → {mode, img}
+  if (LIBIDX && LIBIDX._r === !!REPDB && LIBIDX._e === !!EXDB) return LIBIDX;
+  const m = new Map();
+  for (const [, n, md] of EXLIB) m.set(fold(n), { mode: md });
+  for (const e of (EXDB || [])) if (!m.has(fold(e.n)) || !m.get(fold(e.n)).img) m.set(fold(e.n), { mode: (m.get(fold(e.n)) || {}).mode || e.md, img: e.img && e.img[0] ? EXDB_IMG + e.img[0] : null });
+  for (const e of (REPDB || [])) m.set(fold(e.n), { mode: e.md, img: e.img });
+  LIBIDX = { map: m, _r: !!REPDB, _e: !!EXDB };
+  return LIBIDX;
+}
+function libInfo(name) { return libIndex().map.get(fold(name)) || null; }
+function exIcon(name, size = 38) {
+  const i = libInfo(name);
+  return i && i.img ? `<img src="${i.img}" loading="lazy" style="width:${size}px;height:${size}px;border-radius:50%;object-fit:cover;background:#dbeefa">` : '🏋️';
+}
+let libLoading = null;
+function ensureLib(then) { // doczytaj bazy w tle i odśwież widok
+  if (REPDB && EXDB) return;
+  if (!libLoading) libLoading = Promise.allSettled([loadRepdb(), loadExdb()]).then(() => { LIBIDX = null; });
+  libLoading.then(() => then && then());
+}
 // kategorie polskiej listy ↔ mięśnie w bazie ze zdjęciami
 const EXLIB_MAP = { Nogi: ['czworogłowe uda', 'dwugłowe uda', 'łydki', 'przywodziciele', 'odwodziciele'], Pośladki: ['pośladki', 'dwugłowe uda'], Plecy: ['najszersze grzbietu', 'środek pleców', 'dolny odcinek pleców', 'czworoboczne'], Klatka: ['klatka'], Barki: ['barki'], Ramiona: ['biceps', 'triceps', 'przedramiona'], Core: ['brzuch'], Kondycja: [], Mobilność: [] };
 const STYPES = { w: ['W', 'Rozgrzewkowa', 'var(--warn)'], f: ['F', 'Do upadku', 'var(--bad)'], d: ['D', 'Drop set', '#c084fc'] };
@@ -258,6 +279,7 @@ function render() {
   if (!h.length) return renderHome();
   if (h[0] === 'review') return renderReview();
   if (h[0] === 'settings') return renderSettings();
+  if (h[0] === 'unify') return renderUnify();
   if (h[0] === 'c') {
     const c = client(h[1]); if (!c) return go('#/');
     if (h.length === 2) return renderClient(c);
@@ -518,13 +540,14 @@ function bindClientTab(c, t) {
 function targetText(t) { if (!t) return ''; if (t.sets && t.reps) return `${t.sets} × ${t.reps}`; if (t.sets) return `${t.sets} serie`; return t.reps || t.raw || ''; }
 function renderPlan(c, pid) {
   const p = plan(c, pid); if (!p) return go('#/c/' + c.id);
+  ensureLib(() => { if (location.hash.endsWith('/p/' + pid)) { const y = scrollY; renderPlan(c, pid); scrollTo(0, y); } });
   const n = c.sessions.filter(s => s.planId === p.id).length;
   $app.innerHTML = `${topBar(esc(p.name), { back: 1, right: `<button class="ib" id="pm">⋯</button>` })}<main>
   <div class="small muted" style="margin-bottom:10px">${esc(c.name)}${p.member ? ' · ' + esc(p.member) : ''} · ${p.exercises.length} ćwiczeń · ${n} treningów</div>
   <button class="btn p w" onclick="startWorkout('${c.id}','${p.id}')">▶ Rozpocznij trening</button>
   <div class="sec">Ćwiczenia</div>
   ${(() => { const L = ssLabelsFor(p.exercises.map(e => e.ss)); return p.exercises.map((e, i) => { const l = lastFor(c, e); const sets = l ? l.en.sets.filter(x => x.kg != null || x.reps != null || x.sec || x.raw) : [];
-    return `<div class="card" ${L[i] ? 'style="border-left:4px solid #c084fc"' : ''} onclick="go('#/c/${c.id}/e/${e.id}')"><div class="ex-h"><div class="ex-ic">${L[i] ? `<b style="color:#c084fc">${L[i]}</b>` : '🏋️'}</div><div class="grow"><div class="ex-n">${esc(e.name)}</div>
+    return `<div class="card" ${L[i] ? 'style="border-left:4px solid #c084fc"' : ''} onclick="go('#/c/${c.id}/e/${e.id}')"><div class="ex-h"><div class="ex-ic" style="position:relative">${exIcon(e.name)}${L[i] ? `<b style="position:absolute;top:-6px;left:-6px;font-size:11px;background:#c084fc;color:#111;border-radius:8px;padding:0 4px">${L[i]}</b>` : ''}</div><div class="grow"><div class="ex-n">${esc(e.name)}</div>
     <div class="tiny muted">${targetText(e.target) ? 'Cel: ' + esc(targetText(e.target)) : 'bez zakresu'}${e.note ? ' · ' + esc(e.note) : ''}</div></div>${e.link ? `<a href="${esc(e.link)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">▶</a>` : ''}</div>
     ${sets.length ? `<div class="small"><span class="muted">Ostatnio:</span> ${sets.map(setText).join('<span class="muted"> · </span>')}</div>` : '<div class="small muted">Brak historii</div>'}</div>`; }).join(''); })() || '<div class="empty">Plan jest pusty – dodaj ćwiczenia w edycji</div>'}
   <button class="btn w" onclick="go('#/c/${c.id}/p/${p.id}/edit')">✏️ Edytuj plan</button></main>`;
@@ -543,7 +566,7 @@ function renderPlanEdit(c, pid) {
   ${c.members && c.members.length ? `<label class="field"><span>Osoba</span><select class="inp" id="pmb"><option value="">wszyscy</option>${c.members.map(m => `<option ${p.member === m ? 'selected' : ''}>${esc(m)}</option>`).join('')}</select></label>` : ''}
   <div class="row" style="margin:18px 2px 8px"><div class="sec grow" style="margin:0">Ćwiczenia</div><button class="btn sm" id="ord">↕️ Kolejność i superserie</button></div>
   ${p.exercises.map((e, i) => `<div class="card" ${L[i] ? 'style="border-left:4px solid #c084fc"' : ''}><div class="row"><div class="grow"><div style="font-weight:700">${L[i] ? `<span style="color:#c084fc">${L[i]}</span>` : i + 1 + '.'} ${esc(e.name)}</div><div class="tiny muted">${esc(targetText(e.target) || 'bez zakresu')} · ${MODES[exMode(c, e)][0]}${e.note ? ' · 📌 ' + esc(e.note) : ''}</div></div>
-  <button class="ib" data-ed="${i}">✏️</button><button class="ib" data-del="${i}">🗑️</button></div></div>`).join('')}
+  <button class="ib" data-sw="${i}" title="Zamień na inne">🔄</button><button class="ib" data-ed="${i}">✏️</button><button class="ib" data-del="${i}">🗑️</button></div></div>`).join('')}
   <button class="btn p w" id="ae">＋ Dodaj ćwiczenie</button></main>`;
   document.getElementById('pn').oninput = e => { p.name = e.target.value; save(); };
   const mb = document.getElementById('pmb'); if (mb) mb.onchange = () => { p.member = mb.value || null; save(); };
@@ -556,6 +579,14 @@ function renderPlanEdit(c, pid) {
     { k: 'link', label: 'Link do filmu', v: e && e.link }], fn);
   document.getElementById('ae').onclick = () => exForm(null, o => { if (!o.name) return; p.exercises.push({ id: nid(), name: o.name, mode: o.mode, target: { sets: parseInt(o.sets) || null, reps: o.reps, raw: '' }, note: o.note, link: o.link }); save(); renderPlanEdit(c, pid); });
   $app.querySelectorAll('[data-ed]').forEach(b => b.onclick = () => { const e = p.exercises[+b.dataset.ed]; exForm(e, o => { if (o.name) e.name = o.name; e.mode = o.mode; e.target = { sets: parseInt(o.sets) || null, reps: o.reps, raw: '' }; e.note = o.note; e.link = o.link; save(); renderPlanEdit(c, pid); }); });
+  $app.querySelectorAll('[data-sw]').forEach(b => b.onclick = () => { const i = +b.dataset.sw, old = p.exercises[i];
+    libraryPick(x => {
+      if (norm(x.name) === norm(old.name)) return;
+      const ne = { id: nid(), name: x.name, mode: x.mode || undefined, target: old.target, note: old.note, link: undefined, ss: old.ss };
+      (c.extraEx = c.extraEx || []).push(old); // stara wersja zostaje w historii
+      p.exercises.splice(i, 1, ne); save(); toast(`„${old.name}” → „${x.name}”`); renderPlanEdit(c, pid);
+    });
+  });
   $app.querySelectorAll('[data-del]').forEach(b => b.onclick = () => { const i = +b.dataset.del; confirmBox(`Usunąć „${p.exercises[i].name}” z planu?`, () => { p.exercises.splice(i, 1); save(); renderPlanEdit(c, pid); }); });
   document.getElementById('ord').onclick = () => reorderModal('Kolejność i superserie', p.exercises.map(e => ({ label: e.name, sub: targetText(e.target), ss: e.ss })), (order, ss) => {
     p.exercises = order.map((i, k) => Object.assign(p.exercises[i], { ss: ss[k] || undefined })); save(); renderPlanEdit(c, pid);
@@ -661,7 +692,7 @@ function renderWorkout(c, sid) {
   const cardHtml = cd => {
     const en0 = s.entries[cd.items[0]], ex = exById(c, en0.exId) || { name: '?' };
     const sameEx = cd.items.length > 1, lab = ssl[cd.items[0]];
-    return `<div class="card" ${lab ? 'style="border-left:4px solid #c084fc"' : ''}><div class="ex-h"><div class="ex-ic">${lab ? `<b style="color:#c084fc">${lab}</b>` : '🏋️'}</div><div class="grow"><div class="ex-n">${esc(ex.name)}</div><div class="tiny muted">${esc(targetText(ex.target))}${ex.note ? ' · ' + esc(ex.note) : ''}${sameEx ? ' · razem' : ''}</div></div>${group ? '' : `<button class="ib" data-exm="${cd.items[0]}">⋯</button>`}</div>
+    return `<div class="card" ${lab ? 'style="border-left:4px solid #c084fc"' : ''}><div class="ex-h"><div class="ex-ic" style="position:relative">${exIcon(ex.name)}${lab ? `<b style="position:absolute;top:-6px;left:-6px;font-size:11px;background:#c084fc;color:#111;border-radius:8px;padding:0 4px">${lab}</b>` : ''}</div><div class="grow"><div class="ex-n">${esc(ex.name)}</div><div class="tiny muted">${esc(targetText(ex.target))}${ex.note ? ' · ' + esc(ex.note) : ''}${sameEx ? ' · razem' : ''}</div></div>${group ? '' : `<button class="ib" data-exm="${cd.items[0]}">⋯</button>`}</div>
     ${cd.items.map(ei => table(s.entries[ei], ei, false)).join('')}</div>`;
   };
   const title = group ? 'Trening wspólny' : (p ? p.name : 'Trening');
@@ -859,10 +890,52 @@ function renderReview() {
     if (a === 'swap') swap(it.x, it); else okSibs(it); delete it.x.amb; delete it.x.why; re(); });
 }
 
+// ------------------------------------------------------------------ ujednolicenie nazw ćwiczeń z biblioteką
+let NAMEMAP = null;
+async function renderUnify() {
+  $app.innerHTML = `${topBar('Nazwy z biblioteki', { back: 1 })}<main><div class="empty">Ładuję bazę ćwiczeń…</div></main>`;
+  if (!NAMEMAP) { try { NAMEMAP = await (await fetch('name-map.json')).json(); } catch (e) { NAMEMAP = {}; } }
+  await Promise.allSettled([loadRepdb(), loadExdb()]); LIBIDX = null;
+  const uses = new Map(); // fold(stara nazwa) → {name, n, clients:Set}
+  for (const c of DB.clients) for (const ex of c.plans.flatMap(p => p.exercises.map(e => [e, p])).concat((c.extraEx || []).map(e => [e, null]))) {
+    const [e, p] = ex, k = fold(e.name.trim()); const m = NAMEMAP[k];
+    if (!m || norm(m.to) === norm(e.name)) continue;
+    if (!uses.has(k)) uses.set(k, { name: e.name.trim(), n: 0, clients: new Set(), m });
+    const u = uses.get(k); if (p) u.n++; u.clients.add(c.name.split(' ')[0]);
+  }
+  const all = [...uses.entries()].sort((a, b) => a[1].name.localeCompare(b[1].name, 'pl'));
+  const sure = all.filter(([, u]) => u.m.ok), doubt = all.filter(([, u]) => !u.m.ok);
+  const row = ([k, u], checked) => { const opts = [u.m.to].concat(u.m.alts || []);
+    return `<div class="list-i" style="align-items:flex-start"><input type="checkbox" data-k="${esc(k)}" ${checked ? 'checked' : ''} style="width:22px;height:22px;margin-top:8px;flex:none">
+    <div class="grow"><div class="small muted">${esc(u.name)} <span class="tiny">· ${[...u.clients].slice(0, 3).map(esc).join(', ')}${u.clients.size > 3 ? '…' : ''}</span></div>
+    <div class="row" style="margin-top:4px">${exIcon(u.m.to, 32)}<select class="inp small" data-sel="${esc(k)}" style="min-height:36px;padding:4px 8px">${opts.map(o => `<option>${esc(o)}</option>`).join('')}<option value="__lib">📚 Wybierz z biblioteki…</option></select></div></div></div>`; };
+  $app.innerHTML = `${topBar('Nazwy z biblioteki', { back: 1 })}<main>
+  <div class="small muted" style="margin-bottom:10px">Zamieniam nazwy ćwiczeń w planach na nazwy z biblioteki (z ilustracjami). Historia i wyniki zostają – zmienia się tylko nazwa. Zaznaczone ✓ zostaną zmienione.</div>
+  ${all.length ? '' : '<div class="empty">🎉 Wszystkie nazwy są już ujednolicone</div>'}
+  ${sure.length ? `<div class="sec">Pewne dopasowania (${sure.length})</div><div class="card">${sure.map(r => row(r, true)).join('')}</div>` : ''}
+  ${doubt.length ? `<div class="sec">Do Twojej decyzji (${doubt.length})</div><div class="small muted" style="margin:-4px 2px 8px">Sprawdź propozycję, wybierz inną z listy albo z biblioteki i zaznacz ✓.</div><div class="card">${doubt.map(r => row(r, false)).join('')}</div>` : ''}
+  ${all.length ? `<button class="btn p w" id="apply">Zamień zaznaczone</button>` : ''}</main>`;
+  $app.querySelectorAll('[data-sel]').forEach(sel => sel.onchange = () => {
+    const k = sel.dataset.sel, cb = $app.querySelector(`input[data-k="${CSS.escape(k)}"]`);
+    if (sel.value === '__lib') { libraryPick(x => { const o = document.createElement('option'); o.textContent = x.name; sel.insertBefore(o, sel.firstChild); sel.value = x.name; cb.checked = true; }); sel.value = sel.options[0].value; return; }
+    cb.checked = true; const ic = sel.previousElementSibling; if (ic) ic.outerHTML = exIcon(sel.value, 32);
+  });
+  const ap = document.getElementById('apply'); if (ap) ap.onclick = () => {
+    const pick = new Map(); $app.querySelectorAll('input[data-k]:checked').forEach(cb => pick.set(cb.dataset.k, $app.querySelector(`[data-sel="${CSS.escape(cb.dataset.k)}"]`).value));
+    let n = 0;
+    for (const c of DB.clients) for (const e of c.plans.flatMap(p => p.exercises).concat(c.extraEx || [])) {
+      const to = pick.get(fold(e.name.trim())); if (!to) continue;
+      e.was = e.was || e.name; e.name = to; n++;  // rodzaj zapisu zostaje wg historii
+    }
+    save(true); toast(`Zmieniono ${n} pozycji w planach`); renderUnify();
+  };
+}
+
 // ------------------------------------------------------------------ ustawienia
 function renderSettings() {
   let size = 0; try { size = (localStorage.getItem(KEY) || '').length; } catch (e) {}
   $app.innerHTML = `${topBar('Ustawienia', { back: 1 })}<main>
+  <div class="card"><b>🏷️ Nazwy ćwiczeń z biblioteki</b><p class="small muted">Zamień nazwy w planach podopiecznych na nazwy z biblioteki (z ilustracjami). Niepewne dopasowania zatwierdzasz sam.</p><button class="btn p w" onclick="go('#/unify')">Przejrzyj propozycje</button></div>
   ${Drive.settingsCard()}
   <div class="card"><b>💾 Kopia zapasowa</b><p class="small muted">Ręczna kopia niezależna od Dysku. Eksport zapisuje plik .json w Pobranych – wyślij go sobie na maila/Dysk.${DB.lastBackup ? ' Ostatnia kopia: ' + fmtDate(DB.lastBackup) + '.' : ''}</p>
   <button class="btn p w" onclick="exportData()">Eksportuj kopię (.json)</button><div style="height:8px"></div>
