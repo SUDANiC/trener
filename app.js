@@ -79,6 +79,89 @@ function lastFor(c, ex, skipSid, member, any) { // ostatnie wykonanie ćwiczenia
   return null;
 }
 function prevSets(l) { return l ? l.en.sets.filter(cleanSet) : []; }
+// rodzaje zapisu ćwiczenia
+const MODES = { kgr: ['kg × powt.', ['kg', 'reps']], r: ['powtórzenia', ['reps']], t: ['czas', ['sec']], kgt: ['kg × czas', ['kg', 'sec']] };
+const FLABEL = { kg: 'kg', reps: 'Powt', sec: 'Czas (s)' };
+function exMode(c, ex, en) {
+  if (en && en.mode) return en.mode;
+  if (ex && ex.mode) return ex.mode;
+  if (ex && c) { const l = lastFor(c, ex, null, null, true); if (l) { const st = l.en.sets.filter(x => x.kg != null || x.reps != null || x.sec); if (st.length && st.every(x => x.sec && x.reps == null)) return st.some(x => x.kg != null) ? 'kgt' : 't'; } }
+  return 'kgr';
+}
+function fold(t) { return String(t || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/ł/g, 'l'); }
+function ssLabelsFor(ids) { // superserie: kolejne ćwiczenia z tym samym ss → A1, A2…
+  const out = ids.map(() => null); let letter = 0;
+  for (let i = 0; i < ids.length;) {
+    let j = i; while (ids[i] && j + 1 < ids.length && ids[j + 1] === ids[i]) j++;
+    if (j > i) { const L = String.fromCharCode(65 + letter++ % 26); for (let k = i; k <= j; k++) out[k] = L + (k - i + 1); }
+    i = j + 1;
+  }
+  return out;
+}
+// menedżer kolejności i superserii: items [{label, sub, ss}] → onSave(order, ssIds)
+function reorderModal(title, items, onSave) {
+  let list = items.map((it, i) => ({ ...it, i }));
+  let link = list.map((it, i) => !!(it.ss && list[i + 1] && list[i + 1].ss === it.ss));
+  const draw = m => {
+    let g = 0, cur = null; const grp = list.map((_, i) => { if (i > 0 && link[i - 1]) return cur; cur = link[i] ? 'g' + (++g) : null; return cur; });
+    const labels = ssLabelsFor(grp);
+    m.innerHTML = `<h3>${esc(title)}</h3><div class="small muted" style="margin-bottom:8px">Strzałkami zmieniasz kolejność. 🔗 łączy ćwiczenie z następnym w superserię.</div>
+    ${list.map((it, i) => `<div class="row" style="padding:8px 0;${i ? 'border-top:1px solid var(--line)' : ''}${grp[i] ? ';border-left:3px solid #c084fc;padding-left:8px' : ''}">
+      <div class="grow"><div style="font-weight:600">${labels[i] ? `<span style="color:#c084fc">${labels[i]}</span> ` : ''}${esc(it.label)}</div>${it.sub ? `<div class="tiny muted">${esc(it.sub)}</div>` : ''}</div>
+      <button class="ib" data-mv="${i}:-1" ${i === 0 ? 'disabled style="opacity:.3"' : ''}>▲</button><button class="ib" data-mv="${i}:1" ${i === list.length - 1 ? 'disabled style="opacity:.3"' : ''}>▼</button>
+      ${i < list.length - 1 ? `<button class="ib" data-ln="${i}" style="${link[i] ? 'background:rgba(192,132,252,.25)' : ''}">🔗</button>` : '<span style="width:40px"></span>'}</div>`).join('')}
+    <div style="height:12px"></div><div class="row"><button class="btn grow" data-x>Anuluj</button><button class="btn p grow" data-y>Zapisz</button></div>`;
+    m.querySelectorAll('[data-mv]').forEach(b => b.onclick = () => { const [i, d] = b.dataset.mv.split(':').map(Number), j = i + d; if (j < 0 || j >= list.length) return; [list[i], list[j]] = [list[j], list[i]]; const lo = Math.min(i, j); link[lo] = false; if (lo > 0) link[lo - 1] = false; if (lo + 1 < link.length) link[lo + 1] = false; draw(m); });
+    m.querySelectorAll('[data-ln]').forEach(b => b.onclick = () => { const i = +b.dataset.ln; link[i] = !link[i]; draw(m); });
+    m.querySelector('[data-x]').onclick = () => m.parentNode.remove();
+    m.querySelector('[data-y]').onclick = () => { m.parentNode.remove(); const suf = nid().slice(-5); onSave(list.map(it => it.i), grp.map(g2 => g2 ? g2 + '-' + suf : null)); };
+  };
+  modal('', m => draw(m));
+}
+// biblioteka ćwiczeń
+const EXDB_URL = 'https://cdn.jsdelivr.net/gh/yuhonas/free-exercise-db@main/dist/exercises.json';
+const EXDB_IMG = 'https://cdn.jsdelivr.net/gh/yuhonas/free-exercise-db@main/exercises/';
+let EXDB = null;
+async function loadExdb() {
+  if (EXDB) return EXDB;
+  let r = null;
+  try { const cache = await caches.open('trener-exdb'); r = await cache.match(EXDB_URL); if (!r) { const net = await fetch(EXDB_URL); if (!net.ok) throw new Error(net.status); await cache.put(EXDB_URL, net.clone()); r = net; } }
+  catch (e) { const net = await fetch(EXDB_URL); if (!net.ok) throw new Error('Baza niedostępna'); r = net; }
+  EXDB = await r.json(); return EXDB;
+}
+function libraryPick(onPick) {
+  let cat = 'Twoje', q = '';
+  const own = () => { const out = [], seen = new Set();
+    for (const cl of DB.clients) for (const ex of cl.plans.flatMap(p => p.exercises).concat(cl.extraEx || [])) { const k = norm(ex.name); if (seen.has(k)) continue; seen.add(k); out.push({ name: ex.name, cat: 'Twoje', mode: ex.mode || exMode(cl, ex) }); }
+    return out.sort((a, b) => a.name.localeCompare(b.name, 'pl')); };
+  const pl = () => EXLIB.map(([c, n, m]) => ({ name: n, cat: c, mode: m }));
+  const onl = () => (EXDB || []).map(e => ({ name: e.name, cat: 'Online', mode: e.category === 'cardio' || e.category === 'stretching' ? 't' : e.equipment === 'body only' || !e.equipment ? 'r' : 'kgr', img: e.images && e.images[0], sub: [e.equipment, (e.primaryMuscles || []).join(', ')].filter(Boolean).join(' · ') }));
+  modal(`<h3>Biblioteka ćwiczeń</h3><input class="search" id="lq" placeholder="Szukaj (np. przysiad, wiosło, plank)…" style="margin-bottom:8px">
+    <div class="tabs" id="lcat"></div><div id="lres"></div>`, (m, close) => {
+    const res = m.querySelector('#lres'), qi = m.querySelector('#lq'), cats = m.querySelector('#lcat');
+    const drawCats = () => { cats.innerHTML = ['Twoje', 'Wszystkie'].concat(EXLIB_CATS, ['🌐 Online (EN)']).map(k => `<button class="tab ${k === cat ? 'on' : ''}" data-c="${esc(k)}">${esc(k)}</button>`).join('');
+      cats.querySelectorAll('[data-c]').forEach(b => b.onclick = () => { cat = b.dataset.c; drawCats(); draw(); }); };
+    const draw = async () => {
+      let src;
+      if (cat === '🌐 Online (EN)') {
+        if (!EXDB) { res.innerHTML = '<div class="empty">Ładuję bazę 870+ ćwiczeń…</div>'; try { await loadExdb(); } catch (e) { res.innerHTML = '<div class="empty">Brak połączenia z bazą online</div>'; return; } }
+        src = onl();
+      } else if (cat === 'Twoje') src = own();
+      else if (cat === 'Wszystkie') src = own().concat(pl());
+      else src = pl().filter(x => x.cat === cat);
+      const toks = fold(q).split(/\s+/).filter(Boolean);
+      const seen = new Set();
+      const hits = src.filter(x => { const f = fold(x.name); if (seen.has(f)) return false; seen.add(f); return toks.every(t => f.includes(t)); }).slice(0, 120);
+      const canAdd = q.trim() && !hits.some(h => fold(h.name) === fold(q.trim()));
+      res.innerHTML = (canAdd ? `<div class="list-i" data-new="1"><div class="grow"><b>＋ Nowe: „${esc(q.trim())}”</b></div></div>` : '') +
+        hits.map((x, i) => `<div class="list-i" data-i="${i}">${x.img ? `<img src="${EXDB_IMG + x.img}" loading="lazy" style="width:48px;height:48px;object-fit:cover;border-radius:8px;background:#fff">` : ''}<div class="grow"><div>${esc(x.name)}</div><div class="tiny muted">${esc(x.sub || (x.cat !== 'Twoje' ? x.cat : 'z Twoich planów'))}${x.mode ? ' · ' + MODES[x.mode][0] : ''}</div></div></div>`).join('') || '<div class="empty">Brak wyników</div>';
+      res.querySelectorAll('[data-i]').forEach(el => el.onclick = () => { close(); onPick(hits[+el.dataset.i]); });
+      const nw = res.querySelector('[data-new]'); if (nw) nw.onclick = () => { close(); onPick({ name: q.trim(), mode: null }); };
+    };
+    qi.oninput = () => { q = qi.value; if (q && cat === 'Twoje' && !own().some(x => fold(x.name).includes(fold(q)))) { cat = 'Wszystkie'; drawCats(); } draw(); };
+    drawCats(); draw(); setTimeout(() => qi.focus(), 50);
+  });
+}
 const STYPES = { w: ['W', 'Rozgrzewkowa', 'var(--warn)'], f: ['F', 'Do upadku', 'var(--bad)'], d: ['D', 'Drop set', '#c084fc'] };
 function setLabel(sets, si) { const x = sets[si]; if (x.type && STYPES[x.type]) return STYPES[x.type][0]; return String(sets.slice(0, si + 1).filter(y => y.type !== 'w').length); }
 function setLabelHtml(sets, si) { const t = sets[si].type; return `<span style="color:${t && STYPES[t] ? STYPES[t][2] : 'inherit'}">${setLabel(sets, si)}</span>`; }
@@ -115,8 +198,9 @@ function confirmBox(text, fn, yes = 'Usuń') {
 }
 function prompt2(title, fields, fn) { // fields: [{k,label,v,type,list}]
   const dl = fields.some(f => f.list) ? `<datalist id="exlist">${allExerciseNames().map(n => `<option value="${esc(n)}">`).join('')}</datalist>` : '';
-  modal(`<h3>${esc(title)}</h3>${fields.map(f => `<label class="field"><span>${esc(f.label)}</span>${f.type === 'select' ? `<select class="inp" data-k="${f.k}">${f.options.map(([v, l]) => `<option value="${esc(v)}" ${String(f.v) === String(v) ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>` : f.type === 'area' ? `<textarea class="inp" data-k="${f.k}">${esc(f.v || '')}</textarea>` : `<input class="inp" data-k="${f.k}" value="${esc(f.v ?? '')}" ${f.list ? 'list="exlist"' : ''} ${f.type === 'num' ? 'inputmode="decimal"' : ''} placeholder="${esc(f.ph || '')}">`}</label>`).join('')}${dl}<div class="row"><button class="btn grow" data-x>Anuluj</button><button class="btn p grow" data-y>Zapisz</button></div>`, (m, close) => {
+  modal(`<h3>${esc(title)}</h3>${fields.map(f => `<label class="field"><span>${esc(f.label)}</span>${f.type === 'select' ? `<select class="inp" data-k="${f.k}">${f.options.map(([v, l]) => `<option value="${esc(v)}" ${String(f.v) === String(v) ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>` : f.type === 'area' ? `<textarea class="inp" data-k="${f.k}">${esc(f.v || '')}</textarea>` : `${f.list ? '<div class="row">' : ''}<input class="inp" data-k="${f.k}" value="${esc(f.v ?? '')}" ${f.list ? 'list="exlist"' : ''} ${f.type === 'num' ? 'inputmode="decimal"' : ''} placeholder="${esc(f.ph || '')}">${f.list ? `<button class="btn" data-lib="${f.k}" style="flex:none">📚</button></div>` : ''}`}</label>`).join('')}${dl}<div class="row"><button class="btn grow" data-x>Anuluj</button><button class="btn p grow" data-y>Zapisz</button></div>`, (m, close) => {
     const first = m.querySelector('[data-k]'); setTimeout(() => first && first.focus(), 50);
+    m.querySelectorAll('[data-lib]').forEach(b => b.onclick = () => libraryPick(x => { m.querySelector(`[data-k="${b.dataset.lib}"]`).value = x.name; const md = m.querySelector('[data-k="mode"]'); if (md && x.mode) md.value = x.mode; }));
     m.querySelector('[data-x]').onclick = close;
     m.querySelector('[data-y]').onclick = () => { const o = {}; m.querySelectorAll('[data-k]').forEach(i => o[i.dataset.k] = i.value.trim()); close(); fn(o); };
   });
@@ -400,10 +484,10 @@ function renderPlan(c, pid) {
   <div class="small muted" style="margin-bottom:10px">${esc(c.name)}${p.member ? ' · ' + esc(p.member) : ''} · ${p.exercises.length} ćwiczeń · ${n} treningów</div>
   <button class="btn p w" onclick="startWorkout('${c.id}','${p.id}')">▶ Rozpocznij trening</button>
   <div class="sec">Ćwiczenia</div>
-  ${p.exercises.map(e => { const l = lastFor(c, e); const sets = l ? l.en.sets.filter(x => x.kg != null || x.reps != null || x.sec || x.raw) : [];
-    return `<div class="card" onclick="go('#/c/${c.id}/e/${e.id}')"><div class="ex-h"><div class="ex-ic">🏋️</div><div class="grow"><div class="ex-n">${esc(e.name)}</div>
+  ${(() => { const L = ssLabelsFor(p.exercises.map(e => e.ss)); return p.exercises.map((e, i) => { const l = lastFor(c, e); const sets = l ? l.en.sets.filter(x => x.kg != null || x.reps != null || x.sec || x.raw) : [];
+    return `<div class="card" ${L[i] ? 'style="border-left:4px solid #c084fc"' : ''} onclick="go('#/c/${c.id}/e/${e.id}')"><div class="ex-h"><div class="ex-ic">${L[i] ? `<b style="color:#c084fc">${L[i]}</b>` : '🏋️'}</div><div class="grow"><div class="ex-n">${esc(e.name)}</div>
     <div class="tiny muted">${targetText(e.target) ? 'Cel: ' + esc(targetText(e.target)) : 'bez zakresu'}${e.note ? ' · ' + esc(e.note) : ''}</div></div>${e.link ? `<a href="${esc(e.link)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">▶</a>` : ''}</div>
-    ${sets.length ? `<div class="small"><span class="muted">Ostatnio:</span> ${sets.map(setText).join('<span class="muted"> · </span>')}</div>` : '<div class="small muted">Brak historii</div>'}</div>`; }).join('') || '<div class="empty">Plan jest pusty – dodaj ćwiczenia w edycji</div>'}
+    ${sets.length ? `<div class="small"><span class="muted">Ostatnio:</span> ${sets.map(setText).join('<span class="muted"> · </span>')}</div>` : '<div class="small muted">Brak historii</div>'}</div>`; }).join(''); })() || '<div class="empty">Plan jest pusty – dodaj ćwiczenia w edycji</div>'}
   <button class="btn w" onclick="go('#/c/${c.id}/p/${p.id}/edit')">✏️ Edytuj plan</button></main>`;
   document.getElementById('pm').onclick = () => menu([
     { label: 'Edytuj plan', icon: '✏️', fn: () => go(`#/c/${c.id}/p/${p.id}/edit`) },
@@ -414,25 +498,29 @@ function renderPlan(c, pid) {
 }
 function renderPlanEdit(c, pid) {
   const p = plan(c, pid); if (!p) return go('#/c/' + c.id);
+  const L = ssLabelsFor(p.exercises.map(e => e.ss));
   $app.innerHTML = `${topBar('Edycja planu', { back: 1, right: `<button class="btn sm p" data-act="back">Gotowe</button>` })}<main>
   <label class="field"><span>Nazwa planu</span><input class="inp" id="pn" value="${esc(p.name)}"></label>
   ${c.members && c.members.length ? `<label class="field"><span>Osoba</span><select class="inp" id="pmb"><option value="">wszyscy</option>${c.members.map(m => `<option ${p.member === m ? 'selected' : ''}>${esc(m)}</option>`).join('')}</select></label>` : ''}
-  <div class="sec">Ćwiczenia</div>
-  ${p.exercises.map((e, i) => `<div class="card"><div class="row"><div class="grow"><div style="font-weight:700">${i + 1}. ${esc(e.name)}</div><div class="tiny muted">${esc(targetText(e.target) || 'bez zakresu')}${e.note ? ' · ' + esc(e.note) : ''}</div></div>
-  <button class="ib" data-up="${i}">⬆️</button><button class="ib" data-ed="${i}">✏️</button><button class="ib" data-del="${i}">🗑️</button></div></div>`).join('')}
+  <div class="row" style="margin:18px 2px 8px"><div class="sec grow" style="margin:0">Ćwiczenia</div><button class="btn sm" id="ord">↕️ Kolejność i superserie</button></div>
+  ${p.exercises.map((e, i) => `<div class="card" ${L[i] ? 'style="border-left:4px solid #c084fc"' : ''}><div class="row"><div class="grow"><div style="font-weight:700">${L[i] ? `<span style="color:#c084fc">${L[i]}</span>` : i + 1 + '.'} ${esc(e.name)}</div><div class="tiny muted">${esc(targetText(e.target) || 'bez zakresu')} · ${MODES[exMode(c, e)][0]}${e.note ? ' · 📌 ' + esc(e.note) : ''}</div></div>
+  <button class="ib" data-ed="${i}">✏️</button><button class="ib" data-del="${i}">🗑️</button></div></div>`).join('')}
   <button class="btn p w" id="ae">＋ Dodaj ćwiczenie</button></main>`;
   document.getElementById('pn').oninput = e => { p.name = e.target.value; save(); };
   const mb = document.getElementById('pmb'); if (mb) mb.onchange = () => { p.member = mb.value || null; save(); };
   const exForm = (e, fn) => prompt2(e ? 'Ćwiczenie' : 'Nowe ćwiczenie', [
     { k: 'name', label: 'Nazwa', v: e && e.name, list: 1 },
+    { k: 'mode', label: 'Rodzaj zapisu', type: 'select', options: Object.entries(MODES).map(([k, [l]]) => [k, l]), v: e ? exMode(c, e) : 'kgr' },
     { k: 'sets', label: 'Liczba serii', v: e && e.target && e.target.sets, type: 'num', ph: '3' },
     { k: 'reps', label: 'Zakres powtórzeń / czas', v: e && e.target && e.target.reps, ph: '8-12, 30-60s, max' },
-    { k: 'note', label: 'Wskazówka', v: e && e.note, ph: 'np. pauza 2s na dole' },
+    { k: 'note', label: 'Notatka / wskazówka (widoczna na treningu)', v: e && e.note, ph: 'np. czerwona guma, pauza 2s na dole' },
     { k: 'link', label: 'Link do filmu', v: e && e.link }], fn);
-  document.getElementById('ae').onclick = () => exForm(null, o => { if (!o.name) return; p.exercises.push({ id: nid(), name: o.name, target: { sets: parseInt(o.sets) || null, reps: o.reps, raw: '' }, note: o.note, link: o.link }); save(); renderPlanEdit(c, pid); });
-  $app.querySelectorAll('[data-ed]').forEach(b => b.onclick = () => { const e = p.exercises[+b.dataset.ed]; exForm(e, o => { if (o.name) e.name = o.name; e.target = { sets: parseInt(o.sets) || null, reps: o.reps, raw: '' }; e.note = o.note; e.link = o.link; save(); renderPlanEdit(c, pid); }); });
-  $app.querySelectorAll('[data-up]').forEach(b => b.onclick = () => { const i = +b.dataset.up; if (i > 0) { p.exercises.splice(i - 1, 0, p.exercises.splice(i, 1)[0]); save(); renderPlanEdit(c, pid); } });
+  document.getElementById('ae').onclick = () => exForm(null, o => { if (!o.name) return; p.exercises.push({ id: nid(), name: o.name, mode: o.mode, target: { sets: parseInt(o.sets) || null, reps: o.reps, raw: '' }, note: o.note, link: o.link }); save(); renderPlanEdit(c, pid); });
+  $app.querySelectorAll('[data-ed]').forEach(b => b.onclick = () => { const e = p.exercises[+b.dataset.ed]; exForm(e, o => { if (o.name) e.name = o.name; e.mode = o.mode; e.target = { sets: parseInt(o.sets) || null, reps: o.reps, raw: '' }; e.note = o.note; e.link = o.link; save(); renderPlanEdit(c, pid); }); });
   $app.querySelectorAll('[data-del]').forEach(b => b.onclick = () => { const i = +b.dataset.del; confirmBox(`Usunąć „${p.exercises[i].name}” z planu?`, () => { p.exercises.splice(i, 1); save(); renderPlanEdit(c, pid); }); });
+  document.getElementById('ord').onclick = () => reorderModal('Kolejność i superserie', p.exercises.map(e => ({ label: e.name, sub: targetText(e.target), ss: e.ss })), (order, ss) => {
+    p.exercises = order.map((i, k) => Object.assign(p.exercises[i], { ss: ss[k] || undefined })); save(); renderPlanEdit(c, pid);
+  });
 }
 
 // ------------------------------------------------------------------ trening (logowanie)
@@ -445,7 +533,7 @@ function buildEntries(c, p, member) {
     const all = prevSets(l), warm = all.filter(x => x.type === 'w'), prev = all.filter(x => x.type !== 'w');
     const n = (e.target && e.target.sets) || (prev.length ? Math.min(prev.length, 6) : 3);
     const mk = (pv, type) => { const o = { kg: pv.kg ?? null, reps: pv.reps ?? null, sec: pv.sec ?? null, done: false, ph: true }; if (type) o.type = type; return o; };
-    return { exId: e.id, member: member || null, sets: warm.map(w => mk(w, 'w')).concat(Array.from({ length: n }, (_, i) => { const pv = prev[i] || prev[prev.length - 1] || {}; return mk(pv, pv.type && pv.type !== 'w' ? pv.type : null); })) };
+    return { exId: e.id, member: member || null, ss: e.ss ? e.ss + '@' + (member || '') : null, mode: e.mode || null, sets: warm.map(w => mk(w, 'w')).concat(Array.from({ length: n }, (_, i) => { const pv = prev[i] || prev[prev.length - 1] || {}; return mk(pv, pv.type && pv.type !== 'w' ? pv.type : null); })) };
   });
 }
 function startWorkout(cid, pid) {
@@ -501,18 +589,24 @@ function renderWorkout(c, sid) {
   };
   const swapLbl = en => en.swapFor ? `<div class="tiny muted">zamiast: ${esc(exName(c, en.swapFor))}</div>` : '';
   const progress = m => { let d = 0, t = 0; for (const en of s.entries) if (entryMember(s, en) === m) for (const x of en.sets) { t++; if (x.done) d++; } return `${d}/${t}`; };
+  const lastNote = en => { const ex = exById(c, en.exId); if (!ex) return null; const n = norm(ex.name);
+    for (const ss of sortedSessions(c)) { if (ss.id === s.id || ss.live) continue; for (const e2 of ss.entries) { const m2 = e2.member ?? ss.member ?? null, me = entryMember(s, en); if (me && m2 && m2 !== me) continue; if ((e2.exId === ex.id || norm(exName(c, e2.exId)) === n) && e2.note) return e2.note; } }
+    return null; };
   const table = (en, ei, withName) => {
-    const m = entryMember(s, en);
+    const m = entryMember(s, en), ex = exById(c, en.exId), mode = exMode(c, ex, en), fields = MODES[mode][1];
+    const ln = lastNote(en);
+    const val = (x, f) => x.ph ? '' : fmtNum(x[f]);
+    const ph = (x, f) => x.ph ? fmtNum(x[f] ?? (f === 'sec' ? null : null)) : '';
     return `<div style="${group ? `border-left:3px solid ${memberColor(c, m)};padding-left:8px;margin-top:10px` : ''}">
     ${group ? `<div class="row" style="margin-bottom:4px">${memberChip(c, m)}${withName ? `<span class="small ex-n">${esc(exName(c, en.exId))}</span>` : ''}<div class="grow"></div><button class="ib" data-exm="${ei}" style="width:32px;height:32px">⋯</button></div>` : ''}
     ${swapLbl(en)}${subHint(en)}
-    ${en.note != null ? `<input class="inp small" data-note="${ei}" placeholder="Notatka do ćwiczenia" value="${esc(en.note)}" style="min-height:36px;margin-bottom:8px">` : ''}
-    <table class="sets"><tr><th>Seria</th><th>Poprzednio</th><th>kg</th><th>Powt</th><th>✓</th></tr>
+    ${ln && ln !== en.note ? `<div class="tiny" style="color:#8fb8ff;margin:-2px 0 6px">📝 Ostatnio: ${esc(ln)}</div>` : ''}
+    ${en.note != null ? `<div class="row" style="margin-bottom:8px"><input class="inp small" data-note="${ei}" placeholder="Notatka, np. czerwona guma do podciągania" value="${esc(en.note)}" style="min-height:36px"><button class="btn sm" data-pin="${ei}" title="Zapisz w planie" style="flex:none">📌</button></div>` : ''}
+    <table class="sets"><tr><th>Seria</th><th>Poprzednio</th>${fields.map(f => `<th>${FLABEL[f]}</th>`).join('')}<th>✓</th></tr>
     ${en.sets.map((x, si) => `<tr class="${x.done ? 'done' : ''}"><td><button class="snb" data-st="${ei}:${si}">${setLabelHtml(en.sets, si)}</button></td><td class="prev">${esc(prevOf(en, si))}</td>
-    <td><input class="num" inputmode="decimal" data-e="${ei}" data-s="${si}" data-f="kg" value="${x.ph ? '' : fmtNum(x.kg)}" placeholder="${x.ph ? fmtNum(x.kg) : ''}"></td>
-    <td><input class="num" inputmode="decimal" data-e="${ei}" data-s="${si}" data-f="reps" value="${x.ph ? '' : fmtNum(x.reps)}" placeholder="${x.ph ? (x.sec ? x.sec + 's' : fmtNum(x.reps)) : ''}"></td>
+    ${fields.map(f => `<td><input class="num" inputmode="decimal" data-e="${ei}" data-s="${si}" data-f="${f}" value="${val(x, f)}" placeholder="${ph(x, f)}" ${fields.length === 1 ? 'style="width:120px"' : ''}></td>`).join('')}
     <td><button class="ck ${x.done ? 'on' : ''}" data-ck="${ei}:${si}">✓</button></td></tr>`).join('')}</table>
-    <button class="btn sm w" style="margin-top:8px" data-add="${ei}">＋ Dodaj serię${group ? ' · ' + esc(m) : ''}</button></div>`;
+    <div class="row" style="margin-top:8px"><button class="btn sm grow" data-add="${ei}">＋ Dodaj serię${group ? ' · ' + esc(m) : ''}</button>${en.note == null ? `<button class="btn sm" data-nt="${ei}">📝 Notatka</button>` : ''}</div></div>`;
   };
   // karty: w trybie „Razem” to samo ćwiczenie obu osób w jednej karcie
   const idx = s.entries.map((en, ei) => ei).filter(ei => view === 'all' || entryMember(s, s.entries[ei]) === view);
@@ -523,10 +617,12 @@ function renderWorkout(c, sid) {
     if (group && view === 'all' && prevCard && prevCard.key === k && !prevCard.items.some(j => entryMember(s, s.entries[j]) === entryMember(s, en))) prevCard.items.push(ei);
     else cards.push({ key: k, items: [ei] });
   }
+  const ssl = {}; // etykiety A1/A2 osobno dla każdej osoby
+  for (const mm of (group ? s.members : [s.member || null])) { const ids = s.entries.map((e, i) => [e, i]).filter(([e]) => entryMember(s, e) === mm); const L = ssLabelsFor(ids.map(([e]) => e.ss)); ids.forEach(([, i], k) => ssl[i] = L[k]); }
   const cardHtml = cd => {
     const en0 = s.entries[cd.items[0]], ex = exById(c, en0.exId) || { name: '?' };
-    const sameEx = cd.items.length > 1;
-    return `<div class="card"><div class="ex-h"><div class="ex-ic">🏋️</div><div class="grow"><div class="ex-n">${esc(ex.name)}</div><div class="tiny muted">${esc(targetText(ex.target))}${ex.note ? ' · ' + esc(ex.note) : ''}${sameEx ? ' · razem' : ''}</div></div>${group ? '' : `<button class="ib" data-exm="${cd.items[0]}">⋯</button>`}</div>
+    const sameEx = cd.items.length > 1, lab = ssl[cd.items[0]];
+    return `<div class="card" ${lab ? 'style="border-left:4px solid #c084fc"' : ''}><div class="ex-h"><div class="ex-ic">${lab ? `<b style="color:#c084fc">${lab}</b>` : '🏋️'}</div><div class="grow"><div class="ex-n">${esc(ex.name)}</div><div class="tiny muted">${esc(targetText(ex.target))}${ex.note ? ' · ' + esc(ex.note) : ''}${sameEx ? ' · razem' : ''}</div></div>${group ? '' : `<button class="ib" data-exm="${cd.items[0]}">⋯</button>`}</div>
     ${cd.items.map(ei => table(s.entries[ei], ei, false)).join('')}</div>`;
   };
   const title = group ? 'Trening wspólny' : (p ? p.name : 'Trening');
@@ -535,7 +631,7 @@ function renderWorkout(c, sid) {
   <main>
   <div class="row small muted" style="margin-bottom:10px"><div class="grow">${esc(c.name)}${!group && s.member ? ' · ' + esc(s.member) : ''}${group ? ' · ' + s.members.map(m => esc(m) + ': ' + esc((plan(c, s.planIds[m]) || {}).name || '')).join(', ') : ''}</div>${s.live ? `<span>⏱ <span class="timer" id="el" style="font-size:15px">0:00</span></span>` : ''}</div>
   ${cards.map(cardHtml).join('')}
-  <button class="btn w" id="aex">＋ Dodaj ćwiczenie</button>
+  <div class="row"><button class="btn grow" id="aex">＋ Dodaj ćwiczenie</button><button class="btn" id="ord">↕️ Kolejność</button></div>
   ${s.live ? `<div style="height:10px"></div><button class="btn w danger" id="discard">Odrzuć trening</button>` : ''}
   </main>${restBar()}`;
   const rerender = () => { const sy = window.scrollY; renderWorkout(c, sid); window.scrollTo(0, sy); };
@@ -543,16 +639,22 @@ function renderWorkout(c, sid) {
   $app.querySelectorAll('[data-wv]').forEach(b => b.onclick = () => { ui.wview[s.id] = b.dataset.wv; renderWorkout(c, sid); });
   $app.querySelectorAll('input.num').forEach(inp => {
     inp.oninput = () => { const x = s.entries[+inp.dataset.e].sets[+inp.dataset.s];
-      if (x.ph) { x.ph = false; inp.closest('tr').querySelectorAll('input.num').forEach(o => { if (o !== inp && !o.value && o.placeholder && !/s$/.test(o.placeholder)) o.value = o.placeholder; o.placeholder = ''; }); }
-      x[inp.dataset.f] = parseNum(inp.value); if (inp.dataset.f === 'reps') x.sec = x.sec && !inp.value ? x.sec : (inp.value ? null : x.sec); delete x.amb; x.raw = null; save(); };
+      if (x.ph) { x.ph = false; inp.closest('tr').querySelectorAll('input.num').forEach(o => { if (o !== inp && !o.value && o.placeholder) o.value = o.placeholder; o.placeholder = ''; }); }
+      x[inp.dataset.f] = parseNum(inp.value); delete x.amb; delete x.note; delete x.text; x.raw = null; save(); };
   });
   $app.querySelectorAll('[data-note]').forEach(inp => inp.oninput = () => { s.entries[+inp.dataset.note].note = inp.value; save(); });
+  $app.querySelectorAll('[data-nt]').forEach(b => b.onclick = () => { s.entries[+b.dataset.nt].note = ''; rerender(); const i = $app.querySelector(`[data-note="${b.dataset.nt}"]`); if (i) i.focus(); });
+  $app.querySelectorAll('[data-pin]').forEach(b => b.onclick = () => { const en = s.entries[+b.dataset.pin], ex = exById(c, en.exId); if (!ex) return; ex.note = en.note || ''; save(); toast(en.note ? 'Notatka zapisana w planie 📌' : 'Usunięto notatkę z planu'); rerender(); });
   $app.querySelectorAll('[data-ck]').forEach(b => b.onclick = () => {
     const [ei, si] = b.dataset.ck.split(':').map(Number); const x = s.entries[ei].sets[si];
     if (x.ph) { x.ph = false; }
     x.done = !x.done; save();
     if (x.done && navigator.vibrate) navigator.vibrate(30);
-    if (x.done && s.live) startRest();
+    const en = s.entries[ei]; let nxt = null;
+    for (let k = ei + 1; k < s.entries.length; k++) if (entryMember(s, s.entries[k]) === entryMember(s, en)) { nxt = s.entries[k]; break; }
+    const inSuper = en.ss && nxt && nxt.ss === en.ss;
+    if (x.done && s.live && !inSuper) startRest();
+    if (x.done && inSuper) toast('Superseria → ' + exName(c, nxt.exId));
     rerender();
   });
   $app.querySelectorAll('[data-st]').forEach(b => b.onclick = () => {
@@ -580,11 +682,15 @@ function renderWorkout(c, sid) {
             en.sets = Array.from({ length: Math.max(en.sets.length, 1) }, (_, i) => { const pv = prev[i] || prev[prev.length - 1] || {}; return { kg: pv.kg ?? null, reps: pv.reps ?? null, sec: pv.sec ?? null, done: false, ph: true }; });
             save(); rerender(); }) },
           { label: 'Notatka do ćwiczenia', icon: '📝', fn: () => { en.note = en.note || ''; save(); rerender(); } },
+          { label: 'Rodzaj zapisu: ' + MODES[exMode(c, exById(c, en.exId), en)][0], icon: '⚖️', fn: () => menu(Object.entries(MODES).map(([k, [l]]) => ({ label: l, icon: k === exMode(c, exById(c, en.exId), en) ? '✅' : '▫️', fn: () => { en.mode = k; const ex = exById(c, en.exId); if (ex) ex.mode = k; save(); rerender(); } }))) },
+          (() => { let nx = -1; for (let k = ei + 1; k < s.entries.length; k++) if (entryMember(s, s.entries[k]) === entryMember(s, en)) { nx = k; break; }
+            if (nx < 0) return null; const linked = en.ss && s.entries[nx].ss === en.ss;
+            return { label: linked ? 'Rozłącz superserię z następnym' : 'Superseria z: ' + exName(c, s.entries[nx].exId), icon: '🔗', fn: () => { if (linked) { s.entries[nx].ss = s.entries[nx + 1] && s.entries[nx + 1].ss === s.entries[nx].ss ? s.entries[nx].ss : null; const old = en.ss; for (let k = nx; k < s.entries.length && s.entries[k].ss === old; k++) s.entries[k].ss = old + 'b'; } else { const id = en.ss || s.entries[nx].ss || 'g' + nid(); en.ss = id; s.entries[nx].ss = id; } save(); rerender(); } }; })(),
           { label: 'Usuń ostatnią serię', icon: '➖', fn: () => { en.sets.pop(); save(); rerender(); } },
           { label: 'Historia ćwiczenia', icon: '📈', fn: () => go(`#/c/${c.id}/e/${en.exId}`) },
-          { label: 'Usuń z tego treningu', icon: '🗑️', danger: 1, fn: () => { s.entries.splice(ei, 1); save(); rerender(); } }]); });
+          { label: 'Usuń z tego treningu', icon: '🗑️', danger: 1, fn: () => { s.entries.splice(ei, 1); save(); rerender(); } }].filter(Boolean)); });
   document.getElementById('aex').onclick = () => {
-    const fields = [{ k: 'name', label: 'Nazwa', list: 1 }];
+    const fields = [{ k: 'name', label: 'Nazwa', list: 1 }, { k: 'mode', label: 'Rodzaj zapisu', type: 'select', options: Object.entries(MODES).map(([k, [l]]) => [k, l]), v: 'kgr' }];
     if (group) fields.push({ k: 'who', label: 'Dla kogo', type: 'select', options: [['all', 'Obie osoby']].concat(s.members.map(m => [m, m])), v: view });
     fields.push({ k: 'plan', label: 'Dodać też do planu?', type: 'select', options: [['tak', 'Tak'], ['nie', 'Nie, tylko dziś']], v: 'tak' });
     prompt2('Dodaj ćwiczenie', fields, o => {
@@ -593,13 +699,16 @@ function renderWorkout(c, sid) {
       for (const m of who) {
         const pl = plan(c, group ? s.planIds[m] : s.planId);
         let ex = pl && pl.exercises.find(e => norm(e.name) === norm(o.name));
-        if (!ex) { ex = { id: nid(), name: o.name, target: null }; if (pl && o.plan === 'tak') pl.exercises.push(ex); else (c.extraEx = c.extraEx || []).push(ex); }
+        if (!ex) { ex = { id: nid(), name: o.name, target: null, mode: o.mode }; if (pl && o.plan === 'tak') pl.exercises.push(ex); else (c.extraEx = c.extraEx || []).push(ex); }
         const prev = prevSets(lastFor(c, ex, s.id, m));
-        s.entries.push({ exId: ex.id, member: m, sets: Array.from({ length: Math.max(prev.length, 3) }, (_, i) => { const pv = prev[i] || {}; return { kg: pv.kg ?? null, reps: pv.reps ?? null, done: false, ph: true }; }) });
+        s.entries.push({ exId: ex.id, member: m, mode: o.mode, sets: Array.from({ length: Math.max(prev.length, 3) }, (_, i) => { const pv = prev[i] || {}; return { kg: pv.kg ?? null, reps: pv.reps ?? null, done: false, ph: true }; }) });
       }
       save(); rerender();
     });
   };
+  document.getElementById('ord').onclick = () => reorderModal('Kolejność i superserie', s.entries.map(en => ({ label: exName(c, en.exId), sub: (group ? entryMember(s, en) + ' · ' : '') + en.sets.length + ' serie', ss: en.ss })), (order, ss) => {
+    s.entries = order.map((i, k) => Object.assign(s.entries[i], { ss: ss[k] })); save(); rerender();
+  });
   document.getElementById('fin').onclick = () => {
     for (const en of s.entries) en.sets = en.sets.filter(x => !(x.ph && !x.done) && (x.kg != null || x.reps != null || x.sec != null || x.done));
     for (const en of s.entries) for (const x of en.sets) delete x.ph;
@@ -634,6 +743,7 @@ function renderSession(c, sid) {
   $app.innerHTML = `${topBar(esc(sessTitle(s, c)), { back: done ? 0 : 1, right: `<button class="ib" id="sm">⋯</button>` })}<main>
   ${done ? `<div class="card" style="border-color:var(--ok)"><div style="font-weight:800;font-size:18px">Trening zapisany 💪</div>
     <div class="row" style="margin:10px 0"><div class="stat"><b>${s.dur || 0} min</b><span class="tiny muted">czas</span></div><div class="stat"><b>${nSets}</b><span class="tiny muted">serie robocze</span></div><div class="stat"><b>${fmtNum(Math.round(vol))} kg</b><span class="tiny muted">objętość</span></div></div>
+    <button class="btn ok w" id="rep" style="margin-bottom:8px">📤 Wyślij raport podopiecznemu</button>
     <div class="row"><button class="btn p grow" id="toc">👤 ${esc(c.name.split(' ')[0])}</button><button class="btn grow" id="toh">🏠 Ekran główny</button></div></div>` : ''}
   <div class="small muted" style="margin-bottom:10px">${sessWhen(s, c)}${s.dur ? ` · ${s.dur} min` : ''}</div>
   ${s.entries.map((en, ei) => `<div class="card"><div class="ex-h"><div class="ex-ic">🏋️</div><div class="grow"><div class="ex-n">${esc(exName(c, en.exId))}</div>${en.swapFor ? `<div class="tiny muted">zamiast: ${esc(exName(c, en.swapFor))}</div>` : ''}</div>${s.members && en.member ? memberChip(c, en.member) : ''}</div>
@@ -642,10 +752,12 @@ function renderSession(c, sid) {
   </main>`;
   $app.querySelectorAll('[data-fix]').forEach(b => b.onclick = () => { const [ei, si] = b.dataset.fix.split(':').map(Number); const en = s.entries[ei], x = en.sets[si]; editSet(x, () => { for (const y of en.sets) if (y !== x && y.dup && y.raw === x.raw) { y.kg = x.kg; y.reps = x.reps; y.sec = x.sec; delete y.amb; delete y.why; } save(); renderSession(c, sid); }); });
   if (done) {
+    document.getElementById('rep').onclick = () => Report.menuFor(c, s);
     document.getElementById('toc').onclick = () => { ui.justDone = null; location.replace('#/c/' + c.id); };
     document.getElementById('toh').onclick = () => { ui.justDone = null; location.replace('#/'); };
   }
   document.getElementById('sm').onclick = () => menu([
+    { label: 'Raport PDF / obrazek', icon: '📤', fn: () => Report.menuFor(c, s) },
     { label: 'Edytuj serie', icon: '✏️', fn: () => go(`#/c/${c.id}/w/${s.id}`) },
     { label: 'Ustaw datę', icon: '📅', fn: () => prompt2('Data treningu', [{ k: 'd', label: 'Data (RRRR-MM-DD)', v: (s.date || new Date().toISOString()).slice(0, 10) }], o => { if (/^\d{4}-\d{2}-\d{2}$/.test(o.d)) { s.date = new Date(o.d + 'T12:00:00').toISOString(); save(); renderSession(c, sid); } else toast('Zły format daty'); }) },
     { label: 'Usuń trening', icon: '🗑️', danger: 1, fn: () => confirmBox('Usunąć ten trening?', () => { c.sessions = c.sessions.filter(x => x !== s); save(); history.back(); }) },
